@@ -8,7 +8,7 @@ name = "orion-shadow"
 version = "0.1.0"
 description = "Orion Gimbal & Camera Simulator for SIL/HIL testing"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "asyncio",
 ]
