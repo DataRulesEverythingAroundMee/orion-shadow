@@ -7,6 +7,7 @@ from orion_shadow.engine.faults import FaultEngine
 
 class GimbalState:
     def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None):
+        self.dt = dt
         self.physics = PhysicsEngine(dt)
         self.terrain = terrain_engine
         self.faults = FaultEngine()
@@ -35,10 +36,22 @@ class GimbalState:
         self.aircraft_roll = 0.0
         self.aircraft_pitch = 0.0
 
+        # Lifecycle & Diagnostics
+        self.uptime = 0.0
+        self.error_count = 0
+        self.fault_count = 0
+
     def update_from_command(self, packet: OrionPacket):
         if packet.packet_id == OrionPktType.INITIALIZE:
             self.initialized = True
             
+        elif packet.packet_id == OrionPktType.RESET:
+            self.__init__(dt=self.dt, terrain_engine=self.terrain)
+            self.initialized = True
+
+        elif packet.packet_id == OrionPktType.STARTUP_CMD:
+            self.initialized = True
+
         elif packet.packet_id == OrionPktType.CMD:
             # Assuming CMD data is pan (f32), tilt (f32)
             if len(packet.data) >= 8:
@@ -96,6 +109,9 @@ class GimbalState:
         if self.terrain and self.terrain.enabled:
             terrain_alt = self.terrain.get_elevation(self.gps_lat, self.gps_lon)
             self.gps_alt = terrain_alt
+        
+        # Update uptime
+        self.uptime += self.dt
 
     def get_telemetry_packet(self) -> bytes:
         # ORION_PKT_POSITIONS (0x0A): pan (f32), tilt (f32)
@@ -117,3 +133,8 @@ class GimbalState:
         # In real hardware this would be IMU/Gyro
         sensor_data = struct.pack(">fff", 0.0, 0.0, 1.0) # Placeholder
         return OrionPacket(OrionPktType.SENSOR_DATA, sensor_data).encode()
+
+    def get_diagnostics_packet(self) -> bytes:
+        # ORION_PKT_DIAGNOSTICS (0x41): uptime (f32), error_count (u32), fault_count (u32)
+        data = struct.pack(">fII", self.uptime, self.error_count, self.fault_count)
+        return OrionPacket(OrionPktType.DIAGNOSTICS, data).encode()
