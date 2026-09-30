@@ -1,14 +1,10 @@
-
 import pytest
 import struct
 import asyncio
-from orion_shadow.server import (
-    OrionPacket, 
-    ProtocolEngine, 
-    GimbalState, 
-    PhysicsEngine, 
-    OrionPktType
-)
+from orion_shadow.core.protocol import OrionPacket, OrionPktType
+from orion_shadow.core.engine import ProtocolEngine
+from orion_shadow.core.state import GimbalState
+from orion_shadow.engine.physics import PhysicsEngine
 
 def test_packet_encoding_and_checksum():
     # Test the Fletcher-16 mod 251 checksum implementation

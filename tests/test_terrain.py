@@ -1,8 +1,11 @@
-
 import pytest
 import os
 import math
-from orion_shadow.server import TerrainEngine, GimbalState
+from orion_shadow.core.protocol import OrionPacket, OrionPktType, ORION_SYNC0, ORION_SYNC1
+from orion_shadow.core.engine import ProtocolEngine
+from orion_shadow.core.state import GimbalState
+from orion_shadow.engine.terrain import TerrainEngine
+from orion_shadow.engine.physics import PhysicsEngine
 
 def test_terrain_engine_disabled():
     engine = TerrainEngine(dted_path=None)
