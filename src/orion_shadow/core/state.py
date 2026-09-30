@@ -55,10 +55,10 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.RESET:
             self.__init__(dt=self.dt, terrain_engine=self.terrain)
             self.initialized = True
-
+            
         elif packet.packet_id == OrionPktType.STARTUP_CMD:
             self.initialized = True
-
+            
         elif packet.packet_id == OrionPktType.CMD:
             # Assuming CMD data is pan (f32), tilt (f32)
             if len(packet.data) >= 8:
@@ -78,7 +78,7 @@ class GimbalState:
             if len(packet.data) >= 8:
                 self.camera_zoom, self.camera_focus = struct.unpack(">ff", packet.data[:8])
                 self.camera_ready = True
-
+        
         elif packet.packet_id == OrionPktType.LASER_CMD:
             # Expecting Laser Power (f32)
             if len(packet.data) >= 4:
