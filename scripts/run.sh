@@ -6,13 +6,14 @@
 set -e
 
 # Ensure we are in the project root
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../src"
 
 # Default values
 HOST="0.0.0.0"
 PORT="5000"
 DT="0.1"
 DTED_PATH=""
+TILE_URL=""
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -21,6 +22,7 @@ while [[ "$#" -gt 0 ]]; do
         --port) PORT="$2"; shift ;;
         --dt) DT="$2"; shift ;;
         --dted-path) DTED_PATH="$2"; shift ;;
+        --tile-url) TILE_URL="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
@@ -30,7 +32,11 @@ done
 CMD="python3 -m orion_shadow.server --host $HOST --port $PORT --dt $DT"
 
 if [ -n "$DTED_PATH" ]; then
-    CMD="$CMD --dted-path $DTED_PATH"
+    CMD="$CMD --dted-path \"$DTED_PATH\""
+fi
+
+if [ -n "$TILE_URL" ]; then
+    CMD="$CMD --tile-url \"$TILE_URL\""
 fi
 
 echo "Starting OrionShadow Simulator..."
