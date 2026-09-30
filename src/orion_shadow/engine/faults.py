@@ -28,13 +28,9 @@ class FaultEngine:
             
             elif fault['type'] == 'sensor_timeout':
                 # Simulate sensor data freezing/stalling
-                # In a real simulator, this might stop updating gps_lat/lon
-                # We simulate this by injecting zero-delta updates or holding old values
-                # For this simple implementation, we'll just set a flag that the state can use
+                # We set a flag that the GimbalState.update_from_command respects
                 state.is_faulty = True 
             
             elif fault['type'] == 'comms_loss':
-                # Simulate data corruption or loss
-                # In the context of a server, this might mean the server stops reading
-                # For the state, we can simulate it by clearing the initialized flag
+                # Simulate loss of initialization/connection state
                 state.initialized = False
