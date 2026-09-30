@@ -2,9 +2,10 @@ import asyncio
 import argparse
 import struct
 from typing import List, Optional
-from orion_shadow.core.protocol import ProtocolEngine
+from orion_shadow.core.engine import ProtocolEngine
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.terrain import TerrainEngine
+from orion_shadow.engine.video_server import VideoServer
 
 class OrionServer:
     def __init__(self, host='0.0.0.0', port=5000, dt=0.1, dted_path: Optional[str] = None, 
