@@ -1,7 +1,7 @@
-
 import asyncio
 import struct
 import math
+import csv
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional
 
@@ -120,20 +120,47 @@ class PhysicsEngine:
 # --- Terrain Engine ---
 
 class TerrainEngine:
-    """Handles elevation queries from DTED data."""
+    """Handles elevation queries from DTED (CSV-based) data."""
     def __init__(self, dted_path: Optional[str] = None):
         self.enabled = dted_path is not None
         self.dted_path = dted_path
+        self.data: List[Dict[str, float]] = []
         if self.enabled:
             print(f"[*] TerrainEngine enabled with path: {self.dted_path}")
+            self._load_data()
         else:
             print("[*] TerrainEngine disabled (no DTED path provided)")
 
+    def _load_data(self):
+        try:
+            with open(self.dted_path, mode='r') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    self.data.append({
+                        'lat': float(row['lat']),
+                        'lon': float(row['lon']),
+                        'alt': float(row['alt'])
+                    })
+            print(f"[*] Loaded {len(self.data)} terrain points.")
+        except Exception as e:
+            print(f"[!] Failed to load terrain data: {e}")
+
     def get_elevation(self, lat: float, lon: float) -> float:
-        if not self.enabled:
+        if not self.enabled or not self.data:
             return 0.0
-        # Placeholder for real DTED lookup logic
-        return 150.0
+        
+        # Simple Nearest Neighbor lookup
+        best_dist = float('inf')
+        best_alt = 0.0
+        
+        for point in self.data:
+            # Euclidean distance for simplicity in small areas
+            dist = math.sqrt((point['lat'] - lat)**2 + (point['lon'] - lon)**2)
+            if dist < best_dist:
+                best_dist = dist
+                best_alt = point['alt']
+        
+        return best_alt
 
 # --- Gimbal State & Logic ---
 
