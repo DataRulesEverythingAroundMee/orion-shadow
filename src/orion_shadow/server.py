@@ -66,6 +66,8 @@ class OrionServer:
                     self.state.get_diagnostics_packet(),
                     self.state.get_video_options_packet(),
                     self.state.get_tracking_options_packet(),
+                    self.state.get_cameras_packet(),
+                    self.state.get_faults_packet(),
                 ]
                         
                 for writer in list(self.clients):
