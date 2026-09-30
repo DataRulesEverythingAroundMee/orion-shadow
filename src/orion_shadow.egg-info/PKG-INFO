@@ -4,7 +4,9 @@ Version: 0.1.0
 Summary: Orion Gimbal & Camera Simulator for SIL/HIL testing
 Requires-Python: >=3.9
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: asyncio
+Dynamic: license-file
 
 
 # Orion Gimbal & Camera Simulator
@@ -30,30 +32,30 @@ The **OrionShadow** replicates the communication behavior of an Orion gimbal by 
 
 The simulator is built as a modular Python application composed of several key layers:
 
-### 1. Protocol Layer (`orion_simulator.protocol`)
+### 1. Protocol Layer (`orion_shadow.protocol`)
 This layer handles the low-level packet construction and parsing. 
 |- **Framing**: Implements the `0xD0 0x0D` sync header.
 |- **Checksum**: Calculates and verifies the modified 16-bit Fletcher's checksum (modulo 251).
 |- **Endianness**: Manages big-endian byte order for all multi-byte fields.
 
-### 2. Physics Engine (`orion_simulator.physics`)
+### 2. Physics Engine (`orion_shadow.physics`)
 Simulates the physical movement of the gimbal axes.
 |- **Integration**: Uses a $dt$-driven update loop to integrate acceleration into velocity and position.
 |- **Dynamics**: Models inertia, velocity limits, and acceleration limits to provide a realistic response to commands.
 |- **Damping**: Simulates mechanical friction to prevent infinite oscillation.
 
-### 3. State Machine (`orion_simulator.state`)
+### 3. State Machine (`orion_shadow.state`)
 Simulates the internal logic of the Orion Crown board.
 |- **Modes**: Manages transitions between `DISABLED`, `FAULT`, `STABILIZING`, and `TRACKING`.
 |- **Commands**: Interprets `ORION_PKT_CMD` to update target pan/tilt angles.
 |- **Telemetry**: Tracks the "current" physical position of the gimbal, which is updated based on physics integration.
 
-### 4. Communication Layer (`orion_simulator.server`)
+### 4. Communication Layer (`orion_shadow.server`)
 An asynchronous TCP/IP server that maintains connections with multiple SDK clients.
 |- **Concurrency**: Uses `asyncio` to handle multiple clients simultaneously.
 |- **Multiplexing**: Broadcasts telemetry updates to all connected clients to mimic real hardware behavior.
 
-### 5. Telemetry Engine (`orion_simulator.telemetry`)
+### 5. Telemetry Engine (`orion_shadow.telemetry`)
 A periodic task that generates and pushes state packets.
 |- **Dynamic Data**: Provides varying GPS, IMU, and gimbal position data.
 |- **Customization**: Allows users to define "nominal" vs "faulty" telemetry profiles.
@@ -81,16 +83,14 @@ The simulator adheres to the `OrionPublicProtocol` version `1.3.0.a`.
 ## 🚀 Quick-Start Guide
 
 ### 1. Prerequisites
-• Python 3.10+
+• Python 3.9+
 • `pip` or `uv`
 
 ### 2. Installation
 Clone the repository and install the package in editable mode:
 
 ```bash
-git clone https://github.com/your-org/orion-simulator.git
-cd orion-simulator
-pip install -e .
+git clone https://github.com/DataRulesEverythingAroundMee/orion-shadow.git\ncd orion-shadow\npip install -e .
 ```
 
 ### 3. Running the Simulator
@@ -98,10 +98,10 @@ Start the simulator as a TCP server. You can adjust the physics timestep (`--dt`
 
 ```bash
 # Standard mode (10Hz)
-python -m orion_simulator.server --host 0.0.0.0 --port 5000
+python -m orion_shadow.server --host 0.0.0.0 --port 5000
 
 # High-fidelity mode (100Hz)
-python -m orion_simulator.server --host 0.0.0.0 --port 5000 --dt 0.01
+python -m orion_shadow.server --host 0.0.0.0 --port 5000 --dt 0.01
 ```
 
 **Command Line Options:**

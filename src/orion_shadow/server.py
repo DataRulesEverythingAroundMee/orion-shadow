@@ -29,6 +29,7 @@ class OrionPktType:
     TRACK_OPTIONS = 0x71
     SENSOR_DATA = 0xD0
     GPS_DATA = 0xD1
+    EXT_HEADING_DATA = 0xD2
 
 # --- Core Protocol ---
 
@@ -126,6 +127,13 @@ class GimbalState:
         self.initialized = False
         self.camera_id = 0
         self.is_faulty = False
+        # Navigation State
+        self.gps_lat = 0.0
+        self.gps_lon = 0.0
+        self.gps_alt = 0.0
+        self.aircraft_heading = 0.0
+        self.aircraft_roll = 0.0
+        self.aircraft_pitch = 0.0
 
     def update_from_command(self, packet: OrionPacket):
         if packet.packet_id == OrionPktType.INITIALIZE:
@@ -139,6 +147,16 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
             if len(packet.data) >= 1:
                 self.camera_id = packet.data[0]
+
+        elif packet.packet_id == OrionPktType.GPS_DATA:
+            # Expecting Lat, Lon, Alt (3 x float32)
+            if len(packet.data) >= 12:
+                self.gps_lat, self.gps_lon, self.gps_alt = struct.unpack(">fff", packet.data[:12])
+
+        elif packet.packet_id == OrionPktType.EXT_HEADING_DATA:
+            # Expecting Heading, Roll, Pitch (3 x float32)
+            if len(packet.data) >= 12:
+                self.aircraft_heading, self.aircraft_roll, self.aircraft_pitch = struct.unpack(">fff", packet.data[:12])
 
     def step(self):
         """Advance the simulation."""

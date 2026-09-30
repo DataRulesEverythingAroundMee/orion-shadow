@@ -59,6 +59,27 @@ def test_gimbal_state_updates():
     state.update_from_command(init_packet)
     assert state.initialized is True
 
+def test_navigation_data_ingestion():
+    state = GimbalState(dt=0.1)
+    
+    # Test GPS Ingestion
+    gps_data = struct.pack(">fff", 34.0522, -118.2437, 150.5)
+    gps_packet = OrionPacket(OrionPktType.GPS_DATA, gps_data)
+    state.update_from_command(gps_packet)
+    
+    assert abs(state.gps_lat - 34.0522) < 0.0001
+    assert abs(state.gps_lon - (-118.2437)) < 0.0001
+    assert abs(state.gps_alt - 150.5) < 0.0001
+
+    # Test Attitude/Heading Ingestion
+    heading_data = struct.pack(">fff", 90.0, 5.0, -2.0) # Heading, Roll, Pitch
+    heading_packet = OrionPacket(OrionPktType.EXT_HEADING_DATA, heading_data)
+    state.update_from_command(heading_packet)
+    
+    assert state.aircraft_heading == 90.0
+    assert state.aircraft_roll == 5.0
+    assert state.aircraft_pitch == -2.0
+
 def test_telemetry_packet_format():
     state = GimbalState(dt=0.1)
     state.physics.pan["pos"] = 12.34
