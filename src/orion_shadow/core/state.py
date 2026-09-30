@@ -36,6 +36,13 @@ class GimbalState:
         self.aircraft_roll = 0.0
         self.aircraft_pitch = 0.0
 
+        # Video & Tracking State
+        self.video_resolution_width = 1920
+        self.video_resolution_height = 1080
+        self.video_fps = 30
+        self.tracking_target_id = 0
+        self.tracking_mode = 0  # 0: None, 1: Object, 2: Point
+
         # Lifecycle & Diagnostics
         self.uptime = 0.0
         self.error_count = 0
@@ -98,6 +105,16 @@ class GimbalState:
             if len(packet.data) >= 12:
                 self.aircraft_heading, self.aircraft_roll, self.aircraft_pitch = struct.unpack(">fff", packet.data[:12])
 
+        elif packet.packet_id == OrionPktType.VIDEO_OPTIONS:
+            # Expecting width(u16), height(u16), fps(u8)
+            if len(packet.data) >= 5:
+                self.video_resolution_width, self.video_resolution_height, self.video_fps = struct.unpack(">HHB", packet.data[:5])
+
+        elif packet.packet_id == OrionPktType.TRACK_OPTIONS:
+            # Expecting target_id(u32), mode(u8)
+            if len(packet.data) >= 5:
+                self.tracking_target_id, self.tracking_mode = struct.unpack(">IB", packet.data[:5])
+
     def step(self):
         """Advance the simulation."""
         self.physics.step(self.target_pan, self.target_tilt)
@@ -138,3 +155,13 @@ class GimbalState:
         # ORION_PKT_DIAGNOSTICS (0x41): uptime (f32), error_count (u32), fault_count (u32)
         data = struct.pack(">fII", self.uptime, self.error_count, self.fault_count)
         return OrionPacket(OrionPktType.DIAGNOSTICS, data).encode()
+
+    def get_video_options_packet(self) -> bytes:
+        # ORION_PKT_VIDEO_OPTIONS (0x70): width(u16), height(u16), fps(u8)
+        data = struct.pack(">HHB", self.video_resolution_width, self.video_resolution_height, self.video_fps)
+        return OrionPacket(OrionPktType.VIDEO_OPTIONS, data).encode()
+
+    def get_tracking_options_packet(self) -> bytes:
+        # ORION_PKT_TRACK_OPTIONS (0x71): target_id(u32), mode(u8)
+        data = struct.pack(">IB", self.tracking_target_id, self.tracking_mode)
+        return OrionPacket(OrionPktType.TRACK_OPTIONS, data).encode()

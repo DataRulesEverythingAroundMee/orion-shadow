@@ -1,4 +1,3 @@
-
 # OrionShadow Documentation
 
 This document provides technical details for engineers integrating with the OrionShadow simulator or developing software for the original Orion gimbal systems.
@@ -27,8 +26,8 @@ Every packet sent by the simulator or received by your software MUST follow the 
 | 2            | ID      | Packet identifier (0-255)                              |
 | 3            | Length  | Data payload length (0-140 bytes)                     |
 | 4...L+3     | Data    | Payload data                                           |
-| L+4         | Fletch0 | Checksum MSB                                           |
-| L+5         | Fletch1 | Checksum LSB                                           |
+| L+4         | Fletch0 | Checksum MSB                                         |
+| L+5         | Fletch1 | Checksum LSB                                         |
 
 ### Checksum Calculation
 The Orion protocol uses a modified 16-bit Fletcher's checksum. It is crucial to implement this exactly as specified, or the gimbal (and the simulator) will reject the packets.

@@ -1,4 +1,3 @@
-
 # Orion Gimbal & Camera Simulator
 
 A high-fidelity Software-in-the-Loop (SIL) and Hardware-in-the-Loop (HIL) simulator for Trillium Engineering Orion gimbaled camera systems. This project is designed to allow software developers to test control algorithms, telemetry processing, and camera management systems without requiring physical gimbal hardware.
@@ -15,6 +14,9 @@ The **OrionShadow** replicates the communication behavior of an Orion gimbal by 
 • **Physics-Driven Dynamics**: Moves via simulated inertia, acceleration, and velocity clamping rather than instant position jumps.
 • **Mock Telemetry**: Generates realistic sensor streams (GPS, IMU, Pan/Tilt positions) to stress-test downstream software.
 • **Command Echoing**: Implements the gimbal's native behavior of echoing configuration packets to all connected clients.
+• **Camera Modeling**: Simulates camera zoom, focus, readiness, and video/tracking configuration.
+• **Fault Simulation**: Injects realistic hardware faults (e.g., sensor timeouts, motor overcurrent) to test control loop resilience.
+• **Lifecycle & Diagnostics**: Supports full gimbal lifecycle management (Reset, Startup) and provides real-time diagnostic telemetry.
 
 ---
 
@@ -22,25 +24,25 @@ The **OrionShadow** replicates the communication behavior of an Orion gimbal by 
 
 The simulator is built as a modular Python application composed of several key layers:
 
-### 1. Protocol Layer (`orion_shadow.protocol`)
+### 1. Protocol Layer (`orion_shadow.core.protocol`)
 This layer handles the low-level packet construction and parsing. 
-|- **Framing**: Implements the `0xD0 0x0D` sync header.
-|- **Checksum**: Calculates and verifies the modified 16-bit Fletcher's checksum (modulo 251).
-|- **Endianness**: Manages big-endian byte order for all multi-byte fields.
+• **Framing**: Implements the `0xD0 0x0D` sync header.
+• **Checksum**: Calculates and verifies the modified 16-bit Fletcher's checksum.
+• **Endianness**: Manages big-endian byte order for all multi-byte fields.
 
-### 2. Physics Engine (`orion_shadow.physics`)
+### 2. Physics Engine (`orion_shadow.engine.physics`)
 Simulates the physical movement of the gimbal axes.
 • **Integration**: Uses a $dt$-driven update loop to integrate acceleration into velocity and position.
 • **Dynamics**: Models inertia, velocity limits, and acceleration limits to provide a realistic response to commands.
 • **Damping**: Simulates mechanical friction to prevent infinite oscillation.
 
-### 3. Terrain Engine (`orion_shadow.terrain`)
+### 3. Terrain Engine (`orion_shadow.engine.terrain`)
 Provides terrain-awareness for altitude-critical simulations.
 • **Optional Activation**: Enabled only when a DTED (Digital Terrain Elevation Data) directory is provided via the CLI.
 • **Elevation Lookup**: Uses DTED data to provide realistic ground elevation at the current GPS coordinates.
 • **Altitude Integration**: Automatically updates the gimbal's reported altitude based on terrain elevation when active.
 
-### 4. State Machine (`orion_shadow.state`)
+### 4. State Machine (`orion_shadow.core.state`)
 Simulates the internal logic of the Orion Crown board.
 • **Modes**: Manages transitions between `DISABLED`, `FAULT`, `STABILIZING`, and `TRACKING`.
 • **Commands**: Interprets `ORION_PKT_CMD` to update target pan/tilt angles.
@@ -51,11 +53,10 @@ An asynchronous TCP/IP server that maintains connections with multiple SDK clien
 • **Concurrency**: Uses `asyncio` to handle multiple clients simultaneously.
 • **Multiplexing**: Broadcasts telemetry updates to all connected clients to mimic real hardware behavior.
 
-
-### 5. Telemetry Engine (`orion_shadow.telemetry`)
+### 6. Telemetry Engine (`orion_shadow.telemetry`)
 A periodic task that generates and pushes state packets.
-|- **Dynamic Data**: Provides varying GPS, IMU, and gimbal position data.
-|- **Customization**: Allows users to define "nominal" vs "faulty" telemetry profiles.
+• **Dynamic Data**: Provides varying GPS, IMU, and gimbal position data.
+• **Customization**: Allows users to define "nominal" vs "faulty" telemetry profiles.
 
 ---
 
@@ -87,7 +88,9 @@ The simulator adheres to the `OrionPublicProtocol` version `1.3.0.a`.
 Clone the repository and install the package in editable mode:
 
 ```bash
-git clone https://github.com/DataRulesEverythingAroundMee/orion-shadow.git\ncd orion-shadow\npip install -e .
+git clone https://github.com/DataRulesEverythingAroundMee/orion-shadow.git
+cd orion-shadow
+pip install -e .
 ```
 
 ### 3. Running the Simulator
@@ -124,7 +127,6 @@ To use the simulator with your existing Orion SDK software, simply change your c
 ---
 
 ## 🧪 Testing
-
 The simulator includes a comprehensive test suite to ensure protocol compliance, physics accuracy, and state machine reliability.
 
 **Run all tests:**
@@ -138,5 +140,4 @@ pytest tests/test_simulator.py
 ```
 
 ## 📄 License
-
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
