@@ -10,7 +10,12 @@ src/orion_shadow.egg-info/top_level.txt
 src/orion_shadow/core/engine.py
 src/orion_shadow/core/protocol.py
 src/orion_shadow/core/state.py
+src/orion_shadow/engine/faults.py
 src/orion_shadow/engine/physics.py
 src/orion_shadow/engine/terrain.py
+tests/test_camera.py
+tests/test_command_control.py
+tests/test_config.py
+tests/test_faults.py
 tests/test_simulator.py
 tests/test_terrain.py
