@@ -61,6 +61,7 @@ class OrionServer:
                 packets = [
                     self.state.get_telemetry_packet(),
                     self.state.get_laser_state_packet(),
+                    self.state.get_camera_state_packet(),
                     self.state.get_sensor_data_packet()
                 ]
                         
