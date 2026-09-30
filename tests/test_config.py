@@ -27,7 +27,6 @@ def test_cmd_respects_limits():
     # Send command for 45.0 (exceeding limit)
     cmd_packet = OrionPacket(OrionPktType.CMD, struct.pack(">ff", 45.0, 45.0))
     state.update_from_command(cmd_packet)
-    
     assert state.target_pan == 10.0
     assert state.target_tilt == 10.0
 
