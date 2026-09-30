@@ -117,11 +117,30 @@ class PhysicsEngine:
         # Apply damping
         axis["vel"] *= self.damping
 
+# --- Terrain Engine ---
+
+class TerrainEngine:
+    """Handles elevation queries from DTED data."""
+    def __init__(self, dted_path: Optional[str] = None):
+        self.enabled = dted_path is not None
+        self.dted_path = dted_path
+        if self.enabled:
+            print(f"[*] TerrainEngine enabled with path: {self.dted_path}")
+        else:
+            print("[*] TerrainEngine disabled (no DTED path provided)")
+
+    def get_elevation(self, lat: float, lon: float) -> float:
+        if not self.enabled:
+            return 0.0
+        # Placeholder for real DTED lookup logic
+        return 150.0
+
 # --- Gimbal State & Logic ---
 
 class GimbalState:
-    def __init__(self, dt: float = 0.1):
+    def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None):
         self.physics = PhysicsEngine(dt)
+        self.terrain = terrain_engine
         self.target_pan = 0.0
         self.target_tilt = 0.0
         self.initialized = False
@@ -161,6 +180,11 @@ class GimbalState:
     def step(self):
         """Advance the simulation."""
         self.physics.step(self.target_pan, self.target_tilt)
+        
+        # If terrain engine is enabled, update altitude from DTED
+        if self.terrain and self.terrain.enabled:
+            terrain_alt = self.terrain.get_elevation(self.gps_lat, self.gps_lon)
+            self.gps_alt = terrain_alt
 
     def get_telemetry_packet(self) -> bytes:
         # ORION_PKT_POSITIONS (0x0A): pan (f32), tilt (f32)
@@ -176,11 +200,12 @@ class GimbalState:
 # --- Server Implementation ---
 
 class OrionServer:
-    def __init__(self, host='0.0.0.0', port=5000, dt=0.1):
+    def __init__(self, host='0.0.0.0', port=5000, dt=0.1, dted_path: Optional[str] = None):
         self.host = host
         self.port = port
         self.dt = dt
-        self.state = GimbalState(dt)
+        self.terrain = TerrainEngine(dted_path)
+        self.state = GimbalState(dt, self.terrain)
         self.engine = ProtocolEngine()
         self.clients: List[asyncio.StreamWriter] = []
 
@@ -254,9 +279,10 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--dt", type=float, default=0.1)
+    parser.add_argument("--dted-path", type=str, default=None, help="Path to DTED folder for terrain simulation")
     args = parser.parse_args()
 
-    server = OrionServer(host=args.host, port=args.port, dt=args.dt)
+    server = OrionServer(host=args.host, port=args.port, dt=args.dt, dted_path=args.dted_path)
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
