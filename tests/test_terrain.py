@@ -1,5 +1,6 @@
 
 import pytest
+import os
 from orion_shadow.server import TerrainEngine, GimbalState
 
 def test_terrain_engine_disabled():
@@ -7,33 +8,31 @@ def test_terrain_engine_disabled():
     assert engine.enabled is False
     assert engine.get_elevation(34.0, -118.0) == 0.0
 
-def test_terrain_engine_enabled_lowland():
-    # Using the lowland.csv we created
-    engine = TerrainEngine(dted_path="tests/terrain_data/lowland.csv")
+def test_terrain_engine_binary_flat():
+    # Path to the mock binary file we created
+    path = "tests/terrain_data/flat.dt0"
+    engine = TerrainEngine(dted_path=path)
     assert engine.enabled is True
-    # Test nearest neighbor for 34.0, -118.0
-    assert engine.get_elevation(34.0, -118.0) == 10.0
-    # Test nearest neighbor for 34.1, -118.1
-    assert engine.get_elevation(34.1, -118.1) == 18.0
+    # Test center of the grid
+    assert engine.get_elevation(34.5, -118.5) == 100.0
 
-def test_terrain_engine_enabled_mountain():
-    engine = TerrainEngine(dted_path="tests/terrain_data/mountain.csv")
+def test_terrain_engine_binary_slope():
+    path = "tests/terrain_data/slope.dt1"
+    engine = TerrainEngine(dted_path=path)
     assert engine.enabled is True
-    assert engine.get_elevation(34.0, -118.0) == 1500.0
-    assert engine.get_elevation(34.1, -118.1) == 3000.0
+    # Test point at lat 34.5 (halfway through lat range 34-35)
+    # elevation = (34.5 - 34.0) * 1000.0 = 500.0
+    assert engine.get_elevation(34.5, -118.5) == 500.0
 
-def test_gimbal_altitude_update():
-    # Verify GimbalState correctly uses TerrainEngine to update altitude
-    engine = TerrainEngine(dted_path="tests/terrain_data/lowland.csv")
+def test_gimbal_altitude_update_binary():
+    path = "tests/terrain_data/flat.dt0"
+    engine = TerrainEngine(dted_path=path)
     state = GimbalState(dt=0.1, terrain_engine=engine)
     
-    # Set GPS to a known point in lowland.csv
-    state.gps_lat = 34.0
-    state.gps_lon = -118.0
-    state.gps_alt = 500.0 # Start with a different altitude
+    state.gps_lat = 34.5
+    state.gps_lon = -118.5
+    state.gps_alt = 0.0
     
-    # Step the simulation
     state.step()
     
-    # Altitude should now be updated from terrain
-    assert state.gps_alt == 10.0
+    assert state.gps_alt == 100.0
