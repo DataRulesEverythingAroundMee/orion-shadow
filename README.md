@@ -30,20 +30,27 @@ This layer handles the low-level packet construction and parsing.
 
 ### 2. Physics Engine (`orion_shadow.physics`)
 Simulates the physical movement of the gimbal axes.
-|- **Integration**: Uses a $dt$-driven update loop to integrate acceleration into velocity and position.
-|- **Dynamics**: Models inertia, velocity limits, and acceleration limits to provide a realistic response to commands.
-|- **Damping**: Simulates mechanical friction to prevent infinite oscillation.
+• **Integration**: Uses a $dt$-driven update loop to integrate acceleration into velocity and position.
+• **Dynamics**: Models inertia, velocity limits, and acceleration limits to provide a realistic response to commands.
+• **Damping**: Simulates mechanical friction to prevent infinite oscillation.
 
-### 3. State Machine (`orion_shadow.state`)
+### 3. Terrain Engine (`orion_shadow.terrain`)
+Provides terrain-awareness for altitude-critical simulations.
+• **Optional Activation**: Enabled only when a DTED (Digital Terrain Elevation Data) directory is provided via the CLI.
+• **Elevation Lookup**: Uses DTED data to provide realistic ground elevation at the current GPS coordinates.
+• **Altitude Integration**: Automatically updates the gimbal's reported altitude based on terrain elevation when active.
+
+### 4. State Machine (`orion_shadow.state`)
 Simulates the internal logic of the Orion Crown board.
-|- **Modes**: Manages transitions between `DISABLED`, `FAULT`, `STABILIZING`, and `TRACKING`.
-|- **Commands**: Interprets `ORION_PKT_CMD` to update target pan/tilt angles.
-|- **Telemetry**: Tracks the "current" physical position of the gimbal, which is updated based on physics integration.
+• **Modes**: Manages transitions between `DISABLED`, `FAULT`, `STABILIZING`, and `TRACKING`.
+• **Commands**: Interprets `ORION_PKT_CMD` to update target pan/tilt angles.
+• **Telemetry**: Tracks the "current" physical position of the gimbal, which is updated based on physics integration.
 
-### 4. Communication Layer (`orion_shadow.server`)
+### 5. Communication Layer (`orion_shadow.server`)
 An asynchronous TCP/IP server that maintains connections with multiple SDK clients.
-|- **Concurrency**: Uses `asyncio` to handle multiple clients simultaneously.
-|- **Multiplexing**: Broadcasts telemetry updates to all connected clients to mimic real hardware behavior.
+• **Concurrency**: Uses `asyncio` to handle multiple clients simultaneously.
+• **Multiplexing**: Broadcasts telemetry updates to all connected clients to mimic real hardware behavior.
+
 
 ### 5. Telemetry Engine (`orion_shadow.telemetry`)
 A periodic task that generates and pushes state packets.
@@ -86,18 +93,24 @@ git clone https://github.com/DataRulesEverythingAroundMee/orion-shadow.git\ncd o
 ### 3. Running the Simulator
 Start the simulator as a TCP server. You can adjust the physics timestep (`--dt`) to increase or decrease simulation fidelity.
 
+To enable terrain-aware simulation, provide the path to your DTED data using the `--dted-path` flag.
+
 ```bash
 # Standard mode (10Hz)
 python -m orion_shadow.server --host 0.0.0.0 --port 5000
 
 # High-fidelity mode (100Hz)
 python -m orion_shadow.server --host 0.0.0.0 --port 5000 --dt 0.01
+
+# Terrain-aware mode
+python -m orion_shadow.server --host 0.0.0.0 --port 5000 --dted-path /path/to/dted/folder
 ```
 
 **Command Line Options:**
 • `--host`: Interface to bind to (default: `0.0.0.0`).
 • `--port`: Port to listen on (default: `5000`).
 • `--dt`: Physics/Telemetry update interval in seconds (default: `0.1`).
+• `--dted-path`: Path to DTED folder for terrain simulation (optional).
 
 ### 4. Integrating Your Software
 To use the simulator with your existing Orion SDK software, simply change your connection settings to point to the simulator's IP.
