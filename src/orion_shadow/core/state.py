@@ -50,6 +50,14 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
             if len(packet.data) >= 1:
                 self.camera_id = packet.data[0]
+                # Simulate a small delay in camera becoming ready after a switch
+                self.camera_ready = False
+            
+        elif packet.packet_id == OrionPktType.CAMERA_CMD:
+            # Expecting Zoom (f32), Focus (f32)
+            if len(packet.data) >= 8:
+                self.camera_zoom, self.camera_focus = struct.unpack(">ff", packet.data[:8])
+                self.camera_ready = True
 
         elif packet.packet_id == OrionPktType.LASER_CMD:
             # Expecting Laser Power (f32)

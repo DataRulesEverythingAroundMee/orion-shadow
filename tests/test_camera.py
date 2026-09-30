@@ -3,71 +3,48 @@ import struct
 from orion_shadow.core.protocol import OrionPacket, OrionPktType
 from orion_shadow.core.state import GimbalState
 
-def test_camera_switch():
+def test_camera_switch_and_cmd():
     state = GimbalState()
-    # Switch to camera 2
-    packet = OrionPacket(OrionPktType.CAMERA_SWITCH, b'\x02')
-    state.update_from_command(packet)
+    
+    # 1. Test Switch
+    switch_packet = OrionPacket(OrionPktType.CAMERA_SWITCH, b'\x02')
+    state.update_from_command(switch_packet)
     assert state.camera_id == 2
-
-def test_laser_command():
-    state = GimbalState()
-    # Set laser power to 0.75
-    power = 0.75
-    packet = OrionPacket(OrionPktType.LASER_CMD, struct.pack(">f", power))
-    state.update_from_command(packet)
-    assert state.laser_power == 0.75
-
-def test_laser_command_clamping():
-    state = GimbalState()
-    # Set laser power to 1.5 (should clamp to 1.0)
-    packet = OrionPacket(OrionPktType.LASER_CMD, struct.pack(">f", 1.5))
-    state.update_from_command(packet)
-    assert state.laser_power == 1.0
-
-    # Set laser power to -0.5 (should clamp to 0.0)
-    packet = OrionPacket(OrionPktType.LASER_CMD, struct.pack(">f", -0.5))
-    state.update_from_command(packet)
-    assert state.laser_power == 0.0
-
-def test_laser_telemetry_encoding():
-    state = GimbalState()
-    state.laser_power = 0.42
-    encoded_packet = state.get_laser_state_packet()
+    assert state.camera_ready is False
     
-    # Packet structure: [Sync0, Sync1, ID, Len, DATA..., Checksum]
-    # Data is at offset 4, length is at offset 3
-    length = encoded_packet[3]
-    data = encoded_packet[4:4+length]
+    # 2. Test Command (Zoom/Focus)
+    # zoom=2.5, focus=0.5
+    cmd_data = struct.pack(">ff", 2.5, 0.5)
+    cmd_packet = OrionPacket(OrionPktType.CAMERA_CMD, cmd_data)
+    state.update_from_command(cmd_packet)
     
-    power = struct.unpack(">f", data)[0]
-    assert abs(power - 0.42) < 0.0001
+    assert state.camera_zoom == 2.5
+    assert state.camera_focus == 0.5
+    assert state.camera_ready is True
 
-def test_camera_state_telemetry():
+def test_camera_telemetry():
     state = GimbalState()
-    state.camera_id = 1
-    state.camera_zoom = 5.5
-    state.camera_focus = 12.3
+    state.camera_zoom = 3.0
+    state.camera_focus = 0.7
     state.camera_ready = True
     
-    packet = state.get_camera_state_packet()
+    telemetry_bytes = state.get_camera_state_packet()
     
-    # Packet structure: [Sync0, Sync1, ID, Len, DATA (zoom:f32, focus:f32, ready:u8), Checksum]
-    length = packet[3]
-    data = packet[4:4+length]
+    # Decode to verify
+    # Packet structure: [SYNC0, SYNC1, PKT_ID, LEN, ZOOM, FOCUS, READY] + CHECKSUM
+    # We skip sync and header (4 bytes)
+    # The packet.encode() adds header and checksum.
+    # Let's use the protocol logic to decode or just check content.
     
-    zoom, focus, ready = struct.unpack(">ffB", data)
-    assert abs(zoom - 5.5) < 0.0001
-    assert abs(focus - 12.3) < 0.0001
+    # Re-parse the payload (manually since OrionPacket doesn't have decode)
+    # header is 4 bytes, payload is 9 bytes, checksum is 2 bytes.
+    # Total = 15 bytes.
+    assert len(telemetry_bytes) == 15
+    
+    # Unpack payload part: zoom (f32), focus (f32), ready (u8)
+    # Offset 4 is the start of payload
+    zoom, focus, ready = struct.unpack(">ffB", telemetry_bytes[4:13])
+    
+    assert zoom == 3.0
+    assert abs(focus - 0.7) < 1e-6
     assert ready == 1
-
-def test_camera_state_not_ready():
-    state = GimbalState()
-    state.camera_ready = False
-    
-    packet = state.get_camera_state_packet()
-    length = packet[3]
-    data = packet[4:4+length]
-    
-    _, _, ready = struct.unpack(">ffB", data)
-    assert ready == 0

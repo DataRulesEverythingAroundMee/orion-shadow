@@ -20,8 +20,10 @@ class OrionPktType:
     FAULTS = 0x42
     CAMERA_SWITCH = 0x60
     CAMERA_STATE = 0x61
+    CAMERA_CMD = 0x62
     CAMERAS = 0x63
     VIDEO_OPTIONS = 0x70
+
     TRACK_OPTIONS = 0x71
     SENSOR_DATA = 0xD0
     GPS_DATA = 0xD1
