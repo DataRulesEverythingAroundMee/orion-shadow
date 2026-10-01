@@ -10,6 +10,8 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
+from unittest.mock import MagicMock, patch
+
 from adsb_attach import (
     haversine_nm,
     calculate_bearing,
@@ -17,7 +19,8 @@ from adsb_attach import (
     extrapolate_position,
     ADSBClient,
     Aircraft,
-    OrionBridge
+    OrionBridge,
+    ADSBTrackerTUI
 )
 from orion_shadow.server import OrionServer
 from orion_shadow.core.protocol import OrionPacket, OrionPktType
@@ -134,6 +137,25 @@ class TestADSBAttach(unittest.TestCase):
         self.assertAlmostEqual(server.state.target_tilt, 20.0, places=1)
 
         bridge.close()
+
+    def test_tui_rendering_bounds(self):
+        """Verify TUI rendering does not crash across various terminal dimensions (including 80x24)."""
+        with patch("curses.color_pair", return_value=0):
+            client = ADSBClient(force_mock=True)
+            bridge = OrionBridge(host="127.0.0.1", port=8745, tilt_deg=20.0)
+            tui = ADSBTrackerTUI(client, bridge, 34.05, -118.25)
+            tui.aircraft_list = client.fetch_closest_aircraft(34.05, -118.25)
+            tui.attached_aircraft = tui.aircraft_list[0]
+            for i in range(10):
+                tui.flight_trail.append((time.time() - i, 34.05, -118.25, 25000))
+
+            for h in [24, 20, 15, 10, 5, 40]:
+                for w in [80, 76, 60, 40, 120]:
+                    stdscr = MagicMock()
+                    stdscr.getmaxyx.return_value = (h, w)
+                    # Verify no uncaught curses exceptions occur
+                    tui._draw_attached_view(stdscr, h, w)
+                    tui._draw_list_view(stdscr, h, w)
 
 
 if __name__ == "__main__":

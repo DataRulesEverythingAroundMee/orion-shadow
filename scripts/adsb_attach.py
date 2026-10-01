@@ -2,7 +2,7 @@
 """
 Orion Shadow - ADS-B Aircraft Attach & Telemetry Bridge
 ======================================================
-Connects to an ADS-B endpoint (such as globe.adsbexchange.com, airplanes.live,
+Connects to open, keyless ADS-B endpoints (such as adsb.lol or opendata.adsb.fi,
 or local dump1090/readsb feeds), retrieves and calculates the closest 50 aircraft
 relative to a specified lat/lon geocoordinate, provides an interactive TUI to browse
 and select an aircraft, and continuously streams the aircraft's lat/lon, altitude,
@@ -144,14 +144,12 @@ class ADSBClient:
     """Fetches aircraft data from ADS-B endpoints or generates realistic mock data."""
 
     DEFAULT_ENDPOINTS = [
-        "https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}",
-        "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/{radius}",
-        "https://globe.adsbexchange.com",
+        "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius}",
+        "https://opendata.adsb.fi/api/v2/lat/{lat}/lon/{lon}/dist/{radius}",
     ]
 
-    def __init__(self, endpoint: Optional[str] = None, api_key: Optional[str] = None, force_mock: bool = False):
-        self.endpoint_raw = endpoint or "https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}"
-        self.api_key = api_key
+    def __init__(self, endpoint: Optional[str] = None, force_mock: bool = False, api_key: Optional[str] = None):
+        self.endpoint_raw = endpoint or "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius}"
         self.force_mock = force_mock
         self.last_source_label = "Uninitialized"
         self._mock_aircraft_db: List[Dict[str, Any]] = []
@@ -240,12 +238,8 @@ class ADSBClient:
     def _query_http(self, url: str) -> Optional[Dict[str, Any]]:
         """Perform HTTP GET request and return JSON object."""
         req = urllib.request.Request(url)
-        req.add_header("User-Agent", "OrionShadow-ADSB-Bridge/1.0 (Linux; x86_64)")
+        req.add_header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         req.add_header("Accept", "application/json")
-        req.add_header("Referer", "https://globe.adsbexchange.com/")
-        if self.api_key:
-            req.add_header("api-auth", self.api_key)
-            req.add_header("x-rapidapi-key", self.api_key)
 
         try:
             with urllib.request.urlopen(req, timeout=5.0) as resp:
@@ -267,25 +261,23 @@ class ADSBClient:
 
         # Build candidates list of URLs to try
         urls_to_try = []
-        if "{lat}" in self.endpoint_raw:
-            urls_to_try.append((self.endpoint_raw, self._build_url(self.endpoint_raw, ref_lat, ref_lon, radius_nm)))
-        elif "globe.adsbexchange.com" in self.endpoint_raw:
-            # If user specified globe.adsbexchange.com, attempt standard endpoints
-            urls_to_try.append(("ADSBExchange Gateway", f"https://gateway.adsbexchange.com/api/aircraft/v2/lat/{ref_lat:.4f}/lon/{ref_lon:.4f}/dist/{int(radius_nm)}/"))
-            urls_to_try.append(("ADSBExchange Re-API", f"https://globe.adsbexchange.com/re-api/?lat={ref_lat:.4f}&lon={ref_lon:.4f}"))
-            urls_to_try.append(("Airplanes.live Fallback", f"https://api.airplanes.live/v2/point/{ref_lat:.4f}/{ref_lon:.4f}/{int(radius_nm)}"))
-            urls_to_try.append(("ADSB.fi Fallback", f"https://opendata.adsb.fi/api/v2/lat/{ref_lat:.4f}/lon/{ref_lon:.4f}/{int(radius_nm)}"))
-        elif self.endpoint_raw.endswith(".json"):
-            # Direct dump1090/readsb aircraft.json endpoint
-            urls_to_try.append(("Custom JSON feed", self.endpoint_raw))
-        else:
-            # Custom base URL or unknown template
-            if self.endpoint_raw.endswith("/"):
-                ep = self.endpoint_raw.rstrip("/")
+        if self.endpoint_raw:
+            if "{lat}" in self.endpoint_raw:
+                urls_to_try.append(("Primary Endpoint", self._build_url(self.endpoint_raw, ref_lat, ref_lon, radius_nm)))
+            elif self.endpoint_raw.endswith(".json"):
+                urls_to_try.append(("Custom JSON feed", self.endpoint_raw))
             else:
-                ep = self.endpoint_raw
-            urls_to_try.append(("Custom Endpoint", f"{ep}/v2/point/{ref_lat:.4f}/{ref_lon:.4f}/{int(radius_nm)}"))
-            urls_to_try.append(("Airplanes.live Fallback", f"https://api.airplanes.live/v2/point/{ref_lat:.4f}/{ref_lon:.4f}/{int(radius_nm)}"))
+                ep = self.endpoint_raw.rstrip("/")
+                urls_to_try.append(("Custom Endpoint", f"{ep}/v2/point/{ref_lat:.4f}/{ref_lon:.4f}/{int(radius_nm)}"))
+
+        # Fallback 100% open, keyless community endpoints
+        fallbacks = [
+            ("ADSB.lol", f"https://api.adsb.lol/v2/point/{ref_lat:.4f}/{ref_lon:.4f}/{int(radius_nm)}"),
+            ("ADSB.fi", f"https://opendata.adsb.fi/api/v2/lat/{ref_lat:.4f}/lon/{ref_lon:.4f}/dist/{int(radius_nm)}"),
+        ]
+        for label, fb_url in fallbacks:
+            if not any(fb_url == u[1] for u in urls_to_try):
+                urls_to_try.append((label, fb_url))
 
         data = None
         used_label = ""
@@ -339,15 +331,16 @@ class ADSBClient:
                     return self._parse_aircraft_entry(item, fallback_lat, fallback_lon)
             return None
 
-        # Attempt to query hex endpoint on supported APIs
+        # Attempt to query hex endpoint on supported open, keyless APIs
         hex_urls = [
-            f"https://api.airplanes.live/v2/hex/{hex_code.lower()}",
+            f"https://api.adsb.lol/v2/hex/{hex_code.lower()}",
             f"https://opendata.adsb.fi/api/v2/hex/{hex_code.lower()}",
         ]
         for url in hex_urls:
             data = self._query_http(url)
-            if data and isinstance(data, dict) and "ac" in data:
-                for entry in data["ac"]:
+            if data and isinstance(data, dict):
+                entries = data.get("ac") or data.get("aircraft") or []
+                for entry in entries:
                     if str(entry.get("hex", "")).strip().upper() == hex_code.upper():
                         return self._parse_aircraft_entry(entry, fallback_lat, fallback_lon)
 
@@ -416,7 +409,7 @@ class ADSBClient:
 class OrionBridge:
     """Maintains a UDP link to the Orion server and streams GPS, heading, and gimbal/camera packets."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = 45.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = 20.0):
         self.host = host
         self.port = port
         self.tilt_deg = tilt_deg
@@ -580,6 +573,27 @@ class ADSBTrackerTUI:
         # Flight history breadcrumbs (timestamp, lat, lon, alt_ft)
         self.flight_trail: List[Tuple[float, float, float, float]] = []
 
+    def _safe_addstr(self, stdscr, y: int, x: int, text: str, attr: int = 0):
+        """Safely write string to curses window without overflowing boundaries or raising ERR."""
+        import curses
+        max_y, max_x = stdscr.getmaxyx()
+        if y < 0 or y >= max_y or x < 0 or x >= max_x:
+            return
+        avail = max_x - x
+        if y == max_y - 1 and len(text) >= avail:
+            trimmed = text[:avail - 1]
+        else:
+            trimmed = text[:avail]
+        if not trimmed:
+            return
+        try:
+            if attr:
+                stdscr.addstr(y, x, trimmed, attr)
+            else:
+                stdscr.addstr(y, x, trimmed)
+        except curses.error:
+            pass
+
     def run(self):
         """Entry point that initializes curses or falls back cleanly."""
         if not sys.stdin.isatty():
@@ -635,6 +649,19 @@ class ADSBTrackerTUI:
             # Render display
             stdscr.erase()
             max_y, max_x = stdscr.getmaxyx()
+
+            if max_y < 12 or max_x < 50:
+                msg = f"Terminal too small ({max_x}x{max_y}). Min: 80x24"
+                self._safe_addstr(stdscr, max_y // 2, max(0, (max_x - len(msg)) // 2), msg, curses.color_pair(5))
+                stdscr.refresh()
+                try:
+                    ch = stdscr.getch()
+                    if ch in (ord('q'), ord('Q')):
+                        self.running = False
+                except Exception:
+                    pass
+                time.sleep(0.1)
+                continue
 
             if self.mode == self.MODE_LIST:
                 self._draw_list_view(stdscr, max_y, max_x)
@@ -751,9 +778,18 @@ class ADSBTrackerTUI:
         curses.echo()
         curses.curs_set(1)
         max_y, max_x = stdscr.getmaxyx()
-        prompt_win = curses.newwin(5, min(60, max_x - 4), max_y // 2 - 2, max(2, (max_x - 60) // 2))
+        win_w = min(60, max_x - 4)
+        win_h = 5
+        win_y = max(0, max_y // 2 - 2)
+        win_x = max(2, (max_x - 60) // 2)
+        if win_w < 20 or max_y < 6:
+            curses.noecho()
+            curses.curs_set(0)
+            return
+
+        prompt_win = curses.newwin(win_h, win_w, win_y, win_x)
         prompt_win.box()
-        prompt_win.addstr(1, 2, "Enter new Latitude Longitude (e.g. 34.05 -118.25):", curses.color_pair(4))
+        self._safe_addstr(prompt_win, 1, 2, "Enter new Latitude Longitude (e.g. 34.05 -118.25):", curses.color_pair(4))
         prompt_win.refresh()
 
         try:
@@ -775,20 +811,20 @@ class ADSBTrackerTUI:
 
         # Header Title
         title = " ORION SHADOW - ADS-B AIRCRAFT ATTACH & TRACKER "
-        stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-        stdscr.addstr(0, 0, title.ljust(max_x - 1)[:max_x - 1])
-        stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+        self._safe_addstr(stdscr, 0, 0, title.ljust(max_x - 1)[:max_x - 1], curses.color_pair(1) | curses.A_BOLD)
 
         # Subtitle / Configuration status line
         orion_color = curses.color_pair(3) if self.bridge.is_connected else curses.color_pair(5)
         orion_status = "CONNECTED" if self.bridge.is_connected else "DISCONNECTED"
         ref_info = f"CENTER: ({self.center_lat:+.4f}, {self.center_lon:+.4f}) | RADIUS: {self.radius_nm:.0f}NM | SOURCE: {self.client.last_source_label}"
-        stdscr.addstr(1, 1, ref_info[:max_x - 2], curses.color_pair(4))
+        self._safe_addstr(stdscr, 1, 1, ref_info[:max_x - 2], curses.color_pair(4))
 
-        bridge_line = f"ORION SERVER: {self.bridge.host}:{self.bridge.port} ["
-        stdscr.addstr(2, 1, bridge_line)
-        stdscr.addstr(orion_status, orion_color | curses.A_BOLD)
-        stdscr.addstr(f"] | TRACKED: {len(self.aircraft_list)} closest aircraft | MODE: SELECTOR")
+        bridge_prefix = f"ORION SERVER: {self.bridge.host}:{self.bridge.port} ["
+        self._safe_addstr(stdscr, 2, 1, bridge_prefix)
+        status_x = 1 + len(bridge_prefix)
+        self._safe_addstr(stdscr, 2, status_x, orion_status, orion_color | curses.A_BOLD)
+        suffix = f"] | TRACKED: {len(self.aircraft_list)} closest aircraft | MODE: SELECTOR"
+        self._safe_addstr(stdscr, 2, status_x + len(orion_status), suffix)
 
         # Table Column Headers
         col_header = (
@@ -796,49 +832,45 @@ class ADSBTrackerTUI:
             f"{'DIST(NM)':>8} | {'BEARING':<8} | {'ALT(FT)':>8} | "
             f"{'SPD(KT)':>7} | {'TRACK':>5} | {'LATITUDE':>9} | {'LONGITUDE':>10} | {'SQWK':<4}"
         )
-        stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
-        stdscr.addstr(4, 0, col_header.ljust(max_x - 1)[:max_x - 1])
-        stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+        self._safe_addstr(stdscr, 4, 0, col_header.ljust(max_x - 1)[:max_x - 1], curses.color_pair(6) | curses.A_BOLD)
 
         # Aircraft Rows
-        visible_rows = max(1, max_y - 8)
-        # Adjust scroll offset to keep selected row visible
-        if self.selected_index < self.scroll_offset:
-            self.scroll_offset = self.selected_index
-        elif self.selected_index >= self.scroll_offset + visible_rows:
-            self.scroll_offset = self.selected_index - visible_rows + 1
+        visible_rows = max(0, max_y - 8)
+        if visible_rows > 0:
+            if self.selected_index < self.scroll_offset:
+                self.scroll_offset = self.selected_index
+            elif self.selected_index >= self.scroll_offset + visible_rows:
+                self.scroll_offset = self.selected_index - visible_rows + 1
 
-        for i in range(visible_rows):
-            row_idx = self.scroll_offset + i
-            screen_y = 5 + i
-            if row_idx >= len(self.aircraft_list):
-                break
+            for i in range(visible_rows):
+                row_idx = self.scroll_offset + i
+                screen_y = 5 + i
+                if row_idx >= len(self.aircraft_list):
+                    break
 
-            ac = self.aircraft_list[row_idx]
-            alt_str = "GND" if ac.alt_baro == 0 else f"{int(ac.alt_baro):,}"
-            bearing_str = f"{int(ac.bearing_deg):03d}° {ac.bearing_cardinal}"
+                ac = self.aircraft_list[row_idx]
+                alt_str = "GND" if ac.alt_baro == 0 else f"{int(ac.alt_baro):,}"
+                bearing_str = f"{int(ac.bearing_deg):03d}° {ac.bearing_cardinal}"
 
-            row_text = (
-                f" {row_idx+1:>2} | {ac.flight:<8} | {ac.hex:<6} | {ac.type_code:<4} | "
-                f"{ac.distance_nm:>7.1f}m | {bearing_str:<8} | {alt_str:>8} | "
-                f"{int(ac.speed):>7} | {int(ac.track):>4}° | {ac.lat:>+9.4f} | {ac.lon:>+10.4f} | {ac.squawk:<4}"
-            )
+                row_text = (
+                    f" {row_idx+1:>2} | {ac.flight:<8} | {ac.hex:<6} | {ac.type_code:<4} | "
+                    f"{ac.distance_nm:>7.1f}m | {bearing_str:<8} | {alt_str:>8} | "
+                    f"{int(ac.speed):>7} | {int(ac.track):>4}° | {ac.lat:>+9.4f} | {ac.lon:>+10.4f} | {ac.squawk:<4}"
+                )
 
-            if row_idx == self.selected_index:
-                stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
-                stdscr.addstr(screen_y, 0, row_text.ljust(max_x - 1)[:max_x - 1])
-                stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
-            else:
-                stdscr.addstr(screen_y, 0, row_text[:max_x - 1])
+                if row_idx == self.selected_index:
+                    self._safe_addstr(stdscr, screen_y, 0, row_text.ljust(max_x - 1)[:max_x - 1], curses.color_pair(2) | curses.A_BOLD)
+                else:
+                    self._safe_addstr(stdscr, screen_y, 0, row_text[:max_x - 1])
 
         # Status Bar
-        stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_message}"[:max_x - 2], curses.color_pair(4))
+        if max_y > 2:
+            self._safe_addstr(stdscr, max_y - 2, 1, f"STATUS: {self.status_message}"[:max_x - 2], curses.color_pair(4))
 
         # Footer Keybindings
-        footer = "[↑/↓/j/k] Navigate  [ENTER] Attach & Fly Attached  [R] Refresh  [C] Change Coords  [M] Toggle Mock  [Q] Quit"
-        stdscr.attron(curses.color_pair(1))
-        stdscr.addstr(max_y - 1, 0, footer.ljust(max_x - 1)[:max_x - 1])
-        stdscr.attroff(curses.color_pair(1))
+        if max_y > 1:
+            footer = "[↑/↓/j/k] Navigate  [ENTER] Attach & Fly Attached  [R] Refresh  [C] Change Coords  [M] Toggle Mock  [Q] Quit"
+            self._safe_addstr(stdscr, max_y - 1, 0, footer.ljust(max_x - 1)[:max_x - 1], curses.color_pair(1))
 
     def _draw_attached_view(self, stdscr, max_y: int, max_x: int):
         import curses
@@ -851,57 +883,81 @@ class ADSBTrackerTUI:
 
         # Header Title
         title = f" ✈ ORION SHADOW - ATTACHED & FLYING WITH {ac.flight} ({ac.hex}) "
-        stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
-        stdscr.addstr(0, 0, title.ljust(max_x - 1)[:max_x - 1])
-        stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+        self._safe_addstr(stdscr, 0, 0, title.ljust(max_x - 1)[:max_x - 1], curses.color_pair(1) | curses.A_BOLD)
 
         # Connection Banner
         orion_color = curses.color_pair(3) if self.bridge.is_connected else curses.color_pair(5)
         orion_status = "STREAMING ACTIVE" if self.bridge.is_connected else "RECONNECTING"
-        stdscr.addstr(2, 2, "ORION SERVER LINK: ", curses.A_BOLD)
-        stdscr.addstr(f"{self.bridge.host}:{self.bridge.port} [{orion_status}]", orion_color | curses.A_BOLD)
-        stdscr.addstr(f"  |  Packets Transmitted: {self.bridge.packets_sent} (Rate: {1.0/self.update_interval:.1f}Hz)")
+        self._safe_addstr(stdscr, 1, 2, "ORION SERVER LINK: ", curses.A_BOLD)
+        status_text = f"{self.bridge.host}:{self.bridge.port} [{orion_status}]"
+        self._safe_addstr(stdscr, 1, 21, status_text, orion_color | curses.A_BOLD)
+        rate_hz = 1.0 / self.update_interval if self.update_interval > 0 else 0.0
+        stats_text = f"  |  Packets Transmitted: {self.bridge.packets_sent} (Rate: {rate_hz:.1f}Hz)"
+        self._safe_addstr(stdscr, 1, 21 + len(status_text), stats_text)
 
-        # Box 1: Aircraft Telemetry
-        box_y = 4
-        stdscr.addstr(box_y, 2, "╔══════════════════════════════ TARGET FLIGHT DATA ══════════════════════════════╗", curses.color_pair(6))
-        stdscr.addstr(box_y + 1, 2, f"║ Callsign / Flight : {ac.flight:<12}       Registration : {ac.reg:<14}     ║", curses.color_pair(6))
-        stdscr.addstr(box_y + 2, 2, f"║ ICAO Hex Address  : {ac.hex:<12}       Aircraft Type: {ac.type_code:<14}     ║", curses.color_pair(6))
-        stdscr.addstr(box_y + 3, 2, f"║ Transponder Squawk: {ac.squawk:<12}       Ground Speed : {int(ac.speed)} kts ({ac.speed*1.852:.1f} km/h)║", curses.color_pair(6))
-        stdscr.addstr(box_y + 4, 2, f"║ Heading / Track   : {int(ac.track):03d}° [{degrees_to_cardinal(ac.track):<3}]       Baro Altitude: {int(ac.alt_baro):,} ft ({alt_m:.1f} m)  ║", curses.color_pair(6))
-        stdscr.addstr(box_y + 5, 2, "╚════════════════════════════════════════════════════════════════════════════════╝", curses.color_pair(6))
+        # Box 1: Aircraft Telemetry (76 columns wide to fit safely in 80-column terminals)
+        box_y = 3
+        speed_str = f"{int(ac.speed)} kts ({ac.speed*1.852:.0f} km/h)"
+        alt_disp = f"{int(ac.alt_baro):,} ft ({alt_m:.0f} m)"
+        track_disp = f"{int(ac.track):03d}° [{degrees_to_cardinal(ac.track):<3}]"
+
+        b1_content = [
+            f"Callsign / Flight : {ac.flight:<12}       Registration : {ac.reg:<14}",
+            f"ICAO Hex Address  : {ac.hex:<12}       Aircraft Type: {ac.type_code:<14}",
+            f"Transponder Squawk: {ac.squawk:<12}       Ground Speed : {speed_str:<18}",
+            f"Heading / Track   : {track_disp:<12}       Baro Altitude: {alt_disp:<18}",
+        ]
+        b1_lines = (
+            ["╔" + "═" * 27 + " TARGET FLIGHT DATA " + "═" * 27 + "╗"]
+            + [f"║ {c.ljust(72)} ║" for c in b1_content]
+            + ["╚" + "═" * 74 + "╝"]
+        )
+        for offset, bline in enumerate(b1_lines):
+            if box_y + offset < max_y - 2:
+                self._safe_addstr(stdscr, box_y + offset, 2, bline, curses.color_pair(6))
 
         # Box 2: Orion Ingestion Coordinates
-        box2_y = box_y + 7
-        stdscr.addstr(box2_y, 2, "╔═════════════════════════ ORION SIMULATOR INGESTION ════════════════════════════╗", curses.color_pair(4))
-        stdscr.addstr(box2_y + 1, 2, f"║ Injected Latitude : {cur_lat:>+12.6f}°   (GPS_DATA pkt 0xD1)                     ║", curses.color_pair(4))
-        stdscr.addstr(box2_y + 2, 2, f"║ Injected Longitude: {cur_lon:>+12.6f}°   (GPS_DATA pkt 0xD1)                     ║", curses.color_pair(4))
-        stdscr.addstr(box2_y + 3, 2, f"║ Injected Altitude : {alt_m:>12.1f}m    (GPS_DATA pkt 0xD1)                     ║", curses.color_pair(4))
-        stdscr.addstr(box2_y + 4, 2, f"║ Injected Heading  : {ac.track:>12.1f}°   (EXT_HEADING_DATA pkt 0xD2)             ║", curses.color_pair(4))
-        stdscr.addstr(box2_y + 5, 2, f"║ Camera Tilt       : {self.bridge.tilt_deg:>12.1f}°   (CMD pkt 0x01)                           ║", curses.color_pair(4))
-        stdscr.addstr(box2_y + 6, 2, "╚════════════════════════════════════════════════════════════════════════════════╝", curses.color_pair(4))
+        box2_y = box_y + len(b1_lines)
+        b2_content = [
+            f"Injected Latitude : {cur_lat:>+12.6f}°   (GPS_DATA pkt 0xD1)",
+            f"Injected Longitude: {cur_lon:>+12.6f}°   (GPS_DATA pkt 0xD1)",
+            f"Injected Altitude : {alt_m:>12.1f}m    (GPS_DATA pkt 0xD1)",
+            f"Injected Heading  : {ac.track:>12.1f}°   (EXT_HEADING_DATA pkt 0xD2)",
+            f"Camera Tilt       : {self.bridge.tilt_deg:>12.1f}°   (CMD pkt 0x01)",
+        ]
+        b2_lines = (
+            ["╔" + "═" * 24 + " ORION SIMULATOR INGESTION " + "═" * 23 + "╗"]
+            + [f"║ {c.ljust(72)} ║" for c in b2_content]
+            + ["╚" + "═" * 74 + "╝"]
+        )
+        for offset, bline in enumerate(b2_lines):
+            if box2_y + offset < max_y - 2:
+                self._safe_addstr(stdscr, box2_y + offset, 2, bline, curses.color_pair(4))
 
-        # Flight Breadcrumbs / History
-        trail_y = box2_y + 8
-        stdscr.addstr(trail_y, 2, "RECENT TELEMETRY FIXES (Dead Reckoning & Live Updates):", curses.A_BOLD)
-        for idx, (ts, tlat, tlon, talt) in enumerate(reversed(self.flight_trail[-5:])):
-            ago = max(0.0, time.time() - ts)
-            line = f"  [{idx+1}] {ago:.1f}s ago -> Lat: {tlat:+.5f}°, Lon: {tlon:+.5f}°, Alt: {int(talt):,}ft"
-            stdscr.addstr(trail_y + 1 + idx, 4, line, curses.color_pair(7))
+        # Flight Breadcrumbs / History (bounded so it never exceeds max_y - 2)
+        trail_y = box2_y + len(b2_lines) + 1
+        if trail_y < max_y - 2:
+            self._safe_addstr(stdscr, trail_y, 2, "RECENT TELEMETRY FIXES (Dead Reckoning & Live Updates):", curses.A_BOLD)
+            max_crumbs = max(0, (max_y - 2) - (trail_y + 1))
+            crumbs_to_show = list(reversed(self.flight_trail))[:min(5, max_crumbs)]
+            for idx, (ts, tlat, tlon, talt) in enumerate(crumbs_to_show):
+                ago = max(0.0, time.time() - ts)
+                line = f"  [{idx+1}] {ago:.1f}s ago -> Lat: {tlat:+.5f}°, Lon: {tlon:+.5f}°, Alt: {int(talt):,}ft"
+                self._safe_addstr(stdscr, trail_y + 1 + idx, 4, line, curses.color_pair(7))
 
         # Status and Controls
-        stdscr.addstr(max_y - 2, 1, f"STATUS: {self.status_message}"[:max_x - 2], curses.color_pair(4))
-        footer = "[ESC / B] Detach & Pick Another Aircraft  [SPACE] Force Resend  [Q] Quit"
-        stdscr.attron(curses.color_pair(1))
-        stdscr.addstr(max_y - 1, 0, footer.ljust(max_x - 1)[:max_x - 1])
-        stdscr.attroff(curses.color_pair(1))
+        if max_y > 2:
+            self._safe_addstr(stdscr, max_y - 2, 1, f"STATUS: {self.status_message}"[:max_x - 2], curses.color_pair(4))
+        if max_y > 1:
+            footer = "[ESC / B] Detach & Pick Another Aircraft  [SPACE] Force Resend  [Q] Quit"
+            self._safe_addstr(stdscr, max_y - 1, 0, footer.ljust(max_x - 1)[:max_x - 1], curses.color_pair(1))
 
 
 # --- Headless / CLI Mode ---
 
 def run_headless(args: argparse.Namespace):
     """Run in non-interactive CLI mode for automated tests and headless environments."""
-    client = ADSBClient(endpoint=args.endpoint, api_key=args.api_key, force_mock=args.mock)
+    client = ADSBClient(endpoint=args.endpoint, force_mock=args.mock)
     bridge = OrionBridge(host=args.orion_host, port=args.orion_port, tilt_deg=args.tilt)
 
     print(f"[*] Querying ADS-B endpoint: {client.endpoint_raw}")
@@ -995,12 +1051,11 @@ def main():
     parser.add_argument("--radius", type=float, default=100.0, help="Search radius in Nautical Miles (default: 100 NM)")
     parser.add_argument("--limit", type=int, default=50, help="Number of closest aircraft to list (default: 50)")
     parser.add_argument("--endpoint", type=str, default=None,
-                        help="ADS-B endpoint URL or template (e.g. 'https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}' or 'globe.adsbexchange.com')")
-    parser.add_argument("--api-key", type=str, default=None, help="API authentication key (e.g. for ADS-B Exchange RapidAPI/Gateway)")
+                        help="ADS-B endpoint URL or template (default: 'https://api.adsb.lol/v2/point/{lat}/{lon}/{radius}', with automatic fallbacks)")
     parser.add_argument("--orion-host", type=str, default="127.0.0.1", help="Orion server IP or hostname")
     parser.add_argument("--orion-port", type=int, default=8745, help="Orion server UDP port (default: 8745)")
     parser.add_argument("--rate", type=float, default=2.0, help="Coordinate transmission rate in Hz")
-    parser.add_argument("--tilt", type=float, default=45.0, help="Camera/gimbal tilt angle in degrees (default: 45.0)")
+    parser.add_argument("--tilt", type=float, default=20.0, help="Camera/gimbal tilt angle in degrees (default: 20.0, limits: -80° to +28°)")
     parser.add_argument("--mock", action="store_true", help="Force mock ADS-B traffic generator for offline testing")
     parser.add_argument("--headless", action="store_true", help="Run in non-interactive CLI mode without curses TUI")
     parser.add_argument("--select", type=str, default=None, help="In headless mode, attach to aircraft by callsign, hex, index (1..50), or 'closest'")
@@ -1012,7 +1067,7 @@ def main():
     if args.headless or not sys.stdin.isatty():
         run_headless(args)
     else:
-        client = ADSBClient(endpoint=args.endpoint, api_key=args.api_key, force_mock=args.mock)
+        client = ADSBClient(endpoint=args.endpoint, force_mock=args.mock)
         bridge = OrionBridge(host=args.orion_host, port=args.orion_port, tilt_deg=args.tilt)
         tui = ADSBTrackerTUI(
             client=client,
