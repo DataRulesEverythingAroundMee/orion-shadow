@@ -144,17 +144,8 @@ class GimbalState:
                 self.camera_id = packet.data[0]
                 self.camera_ready = False
             
-        elif packet.packet_id == OrionPktType.CAMERA_CMD:
-            if len(packet.data) >= 8:
-                zoom, focus = struct.unpack(">ff", packet.data[:8])
-                if zoom >= 1.0:
-                    self.camera_zoom = min(zoom, self.max_total_zoom)
-                if focus >= 0.0:
-                    self.camera_focus = focus
-                self.camera_ready = True
-
-        elif packet.packet_id == OrionPktType.CAMERA_STATE:
-            if len(packet.data) >= 5:
+        elif packet.packet_id in (OrionPktType.CAMERA_CMD, OrionPktType.CAMERA_STATE):
+            if len(packet.data) >= 5 and len(packet.data) < 8:
                 zoom_raw, focus_raw = struct.unpack_from(">hh", packet.data, 0)
                 zoom = zoom_raw / 100.0
                 if zoom >= 1.0:
@@ -174,6 +165,9 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.LASER_CMD:
             if len(packet.data) >= 4:
                 self.laser_power = max(0.0, min(1.0, struct.unpack(">f", packet.data[:4])[0]))
+
+        elif packet.packet_id == OrionPktType.LASER_STATES:
+            return self.get_laser_state_packet()
 
         elif packet.packet_id == OrionPktType.UART_CONFIG:
             if len(packet.data) >= 4:
@@ -210,13 +204,37 @@ class GimbalState:
             elif len(packet.data) >= 12:
                 self.aircraft_heading, self.aircraft_roll, self.aircraft_pitch = struct.unpack(">fff", packet.data[:12])
 
+        elif packet.packet_id == OrionPktType.NETWORK_VIDEO:
+            if len(packet.data) >= 6:
+                self.video_dest_ip, self.video_dest_port = struct.unpack_from(">IH", packet.data, 0)
+            return self.get_network_video_packet()
+
         elif packet.packet_id == OrionPktType.VIDEO_OPTIONS:
-            if len(packet.data) >= 5:
-                self.video_resolution_width, self.video_resolution_height, self.video_fps = struct.unpack(">HHB", packet.data[:5])
+            if len(packet.data) >= 5 and len(packet.data) < 10:
+                try:
+                    self.video_resolution_width, self.video_resolution_height, self.video_fps = struct.unpack(">HHB", packet.data[:5])
+                except Exception:
+                    pass
+            return self.get_video_options_packet()
 
         elif packet.packet_id == OrionPktType.TRACK_OPTIONS:
-            if len(packet.data) >= 5:
+            if len(packet.data) >= 9:
+                self.tracking_mode = packet.data[8]
+            elif len(packet.data) >= 5:
                 self.tracking_target_id, self.tracking_mode = struct.unpack(">IB", packet.data[:5])
+            return self.get_tracking_options_packet()
+
+        elif packet.packet_id == OrionPktType.DIAGNOSTICS:
+            return self.get_diagnostics_packet()
+
+        elif packet.packet_id == OrionPktType.FAULTS:
+            return self.get_faults_packet()
+
+        elif packet.packet_id == OrionPktType.SENSOR_DATA:
+            return self.get_sensor_data_packet()
+
+        elif packet.packet_id == OrionPktType.POSITIONS:
+            return self.get_telemetry_packet()
 
         elif packet.packet_id == OrionPktType.CAMERAS:
             return self.get_cameras_packet()
@@ -265,7 +283,13 @@ class GimbalState:
         return OrionPacket(OrionPktType.POSITIONS, pos_data).encode()
 
     def get_laser_state_packet(self) -> bytes:
-        data = struct.pack(">f", self.laser_power)
+        # OrionLaserStates packet (Orion SDK 3.1.9, Packet ID: 6, min len 1, max len 19)
+        # 1 installed pointer laser: Type=1, Flags: Enabled(15), Armed(14), Active(13), Temp=25C, WaitTimer=0
+        if self.laser_power > 0:
+            flags = (1 << 15) | (1 << 14) | (1 << 13)
+        else:
+            flags = 0
+        data = struct.pack(">BBHBH", 1, 1, flags, 25, 0)
         return OrionPacket(OrionPktType.LASER_STATES, data).encode()
 
     def get_camera_state_packet(self) -> bytes:
@@ -278,19 +302,69 @@ class GimbalState:
         return OrionPacket(OrionPktType.CAMERA_STATE, data).encode()
 
     def get_sensor_data_packet(self) -> bytes:
-        sensor_data = struct.pack(">fff", 0.0, 0.0, 1.0)
-        return OrionPacket(OrionPktType.SENSOR_DATA, sensor_data).encode()
+        # OrionSensorData packet (Orion SDK 3.1.9, Packet ID: 208, min len 22, max len 29)
+        uptime_ms = int(self.uptime * 1000) & 0xFFFFFFFF
+        dt_us = int(self.dt * 1000000) & 0xFFFF
+        counter = getattr(self, "_sensor_counter", 0) + 1
+        self._sensor_counter = counter & 0xFF
+        baro_raw = int(round(101325.0 * 0.02))  # 1013.25 hPa
+        oat_raw = int(round((15.0 + 273.15) * 100.0))  # 15°C
+        gyro_temp_raw = int(round((25.0 + 273.15) * 100.0))  # 25°C
+        accel_z = int(round(9.80665 * 1000.0))  # 1G in mg
+        data = struct.pack(
+            ">hhhhhhHHIHHHhB",
+            0, 0, 0,
+            0, 0, accel_z,
+            baro_raw,
+            oat_raw,
+            uptime_ms,
+            gyro_temp_raw,
+            dt_us,
+            dt_us,
+            -1,
+            counter
+        )
+        return OrionPacket(OrionPktType.SENSOR_DATA, data).encode()
 
     def get_diagnostics_packet(self) -> bytes:
-        data = struct.pack(">fII", self.uptime, self.error_count, self.fault_count)
+        # OrionDiagnostics packet (Orion SDK 3.1.9, Packet ID: 65, min len 28, max len 33)
+        v24 = int(round(self.input_voltage_v * 1000.0))
+        v12 = int(round(12.0 * 1000.0))
+        v3v3 = int(round(3.3 * 1000.0))
+        i24 = int(round((self.power_avg_w / self.input_voltage_v) * 1000.0))
+        data = struct.pack(
+            ">HHHHHHbbbBHHHHHHbBHb",
+            v24, v12, v3v3, i24, 0, 0,
+            35, 35, 35, 0,
+            0, 0, 0, 0, 0, 0,
+            35, 0, 0, 35
+        )
         return OrionPacket(OrionPktType.DIAGNOSTICS, data).encode()
 
     def get_video_options_packet(self) -> bytes:
-        data = struct.pack(">HHB", self.video_resolution_width, self.video_resolution_height, self.video_fps)
+        # VideoOptions packet (Orion SDK 3.1.9, Packet ID: 112, min len 4, max len 49)
+        # Stabilized(7), ShowReticle(5) -> 0xA0
+        data = struct.pack(">BBBBBIB", 0xA0, 0, 0, 0, 25, 0, 0)
         return OrionPacket(OrionPktType.VIDEO_OPTIONS, data).encode()
 
+    def get_network_video_packet(self) -> bytes:
+        # OrionNetworkVideo packet (Orion SDK 3.1.9, Packet ID: 98, min len 6, max len 15)
+        dest_ip = getattr(self, "video_dest_ip", 0xEFFF0001)  # 239.255.0.1 default
+        port = getattr(self, "video_dest_port", 5004)
+        bitrate = getattr(self, "video_bitrate", 4000000)
+        data = struct.pack(">IHIbBBBB", dest_ip, port, bitrate, 64, 0, 30, 0, 0)
+        return OrionPacket(OrionPktType.NETWORK_VIDEO, data).encode()
+
     def get_tracking_options_packet(self) -> bytes:
-        data = struct.pack(">IB", self.tracking_target_id, self.tracking_mode)
+        # TrackOptions packet (Orion SDK 3.1.9, Packet ID: 113, min len 9, max len 31)
+        data = struct.pack(
+            ">16BHBBffBH",
+            0, 0, 0, 0, 0, 0, 0, 0, self.tracking_mode & 0xFF,
+            0, 0, 0, 0, 100, 0, 0,
+            0, 6, 3,
+            0.0, 0.0,
+            51, 0
+        )
         return OrionPacket(OrionPktType.TRACK_OPTIONS, data).encode()
 
     def get_cameras_packet(self) -> bytes:
@@ -335,10 +409,13 @@ class GimbalState:
         return OrionPacket(OrionPktType.KTNC_SETTINGS, data).encode()
 
     def get_faults_packet(self) -> bytes:
+        # OrionFault packet (Orion SDK 3.1.9, Packet ID: 66, exact len 11)
         fault_ids = self.faults.get_active_fault_ids()
         if not fault_ids:
-            return OrionPacket(OrionPktType.FAULTS, struct.pack(">B", 0)).encode()
-        data = struct.pack(f">B{len(fault_ids)}B", len(fault_ids), *fault_ids)
+            data = struct.pack(">BBBII", 0, 0, 0, 0, 0)
+        else:
+            fault_type = fault_ids[0]
+            data = struct.pack(">BBBII", fault_type, 3, 1, fault_type, 0)
         return OrionPacket(OrionPktType.FAULTS, data).encode()
 
     def get_limits_packet(self) -> bytes:
