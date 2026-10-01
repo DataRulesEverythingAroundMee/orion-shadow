@@ -10,6 +10,7 @@ class ProtocolEngine:
             0x4A: "ORION_PKT_BOARD_HEARTBEAT",
             0x5F: "ORION_PKT_ADVANCED_ENCODING",
             0x63: "ORION_PKT_CAMERAS",
+            0x6D: "ORION_PKT_KTNC_SETTINGS",
             0x7A: "ORION_PKT_SIONYX_SETTINGS",
             0x7B: "ORION_PKT_LYNRED_SETTINGS",
             0xD0: "ORION_PKT_SENSOR_DATA",

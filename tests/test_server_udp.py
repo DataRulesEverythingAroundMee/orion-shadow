@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 from orion_shadow.server import OrionServer
 from orion_shadow.core.protocol import OrionPacket, OrionPktType, UDP_OUT_PORT, UDP_IN_PORT, TCP_PORT
 from orion_shadow.core.engine import ProtocolEngine
-from send_init import send_initialize
 
 
 def get_free_port() -> int:
@@ -106,8 +105,13 @@ class TestOrionServerUDP(unittest.TestCase):
             self.assertIn(OrionPktType.POSITIONS, received_packet_ids)
 
     def test_send_init_script_udp(self):
-        send_initialize(host="127.0.0.1", port=self.port)
-        self.assertTrue(self.server.state.initialized)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(2.0)
+            init_pkt = OrionPacket(OrionPktType.INITIALIZE, b"").encode()
+            sock.sendto(init_pkt, ("127.0.0.1", self.port))
+            resp, _ = sock.recvfrom(1024)
+            self.assertEqual(resp, init_pkt)
+            self.assertTrue(self.server.state.initialized)
 
 
 class TestOrionServerSdkPorts(unittest.TestCase):
@@ -175,6 +179,48 @@ class TestOrionServerSdkPorts(unittest.TestCase):
                 # Verify discovery response arrives on in_sock (udp_in_port)
                 resp, _ = in_sock.recvfrom(1024)
                 self.assertEqual(resp, init_pkt)
+        finally:
+            server.close()
+            thread.join(timeout=1.0)
+
+    def test_camera_info_request_response(self):
+        udp_port = get_free_port()
+        tcp_port = get_free_port()
+        server = OrionServer(host="127.0.0.1", port=udp_port, tcp_port=tcp_port, dt=0.05, video_enabled=False)
+        thread = threading.Thread(target=lambda: asyncio.run(server.run()), daemon=True)
+        thread.start()
+        time.sleep(0.1)
+
+        try:
+            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            from orion_sdk.connection import OrionConnection
+            from orion_sdk.packets import OrionCameras
+
+            conn = OrionConnection.open_tcp("127.0.0.1", tcp_port)
+            conn.send(OrionCameras())
+
+            received_cam_pkt = None
+            for _ in range(20):
+                pkt = conn.receive(timeout=0.1)
+                if isinstance(pkt, OrionCameras) and pkt.NumCameras > 0:
+                    received_cam_pkt = pkt
+                    break
+
+            conn.close()
+            self.assertIsNotNone(received_cam_pkt)
+            self.assertEqual(received_cam_pkt.NumCameras, 1)
+            self.assertEqual(received_cam_pkt.OrionCamSettings[0].Type, 1)  # Visible
+            self.assertEqual(received_cam_pkt.OrionCamSettings[0].Proto, 7)  # KTnC
+
+            # Test OrionKtncSettings packet
+            from orion_sdk.packets import OrionKtncSettings
+            conn2 = OrionConnection.open_tcp("127.0.0.1", tcp_port)
+            conn2.send(OrionKtncSettings(Index=0, Sharpness=10))
+            ktnc_resp = conn2.receive(timeout=0.5)
+            conn2.close()
+            self.assertIsNotNone(ktnc_resp)
+            self.assertIsInstance(ktnc_resp, OrionKtncSettings)
+            self.assertEqual(server.state.ktnc_sharpness, 10)
         finally:
             server.close()
             thread.join(timeout=1.0)

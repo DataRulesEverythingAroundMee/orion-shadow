@@ -38,6 +38,7 @@ class OrionPktType:
     CAMERA_STATE = 0x61
     CAMERA_CMD = 0x62
     CAMERAS = 0x63
+    KTNC_SETTINGS = 0x6D
     VIDEO_OPTIONS = 0x70
     TRACK_OPTIONS = 0x71
     SIONYX_SETTINGS = 0x7A
@@ -47,6 +48,28 @@ class OrionPktType:
     EXT_HEADING_DATA = 0xD2
     UNIFIED_CAM_ERR_SETTINGS = 0xFD
 
+def compute_checksum(data: bytes) -> tuple:
+    """Compute Fletcher's checksum (mod 251) matching Orion SDK TrilliumPacket.c."""
+    if len(data) == 0:
+        return (1, 1)
+
+    a = (data[0] + 1) % 251
+    b = a
+    for byte in data[1:]:
+        a = (a + byte) % 251
+        b = (b + a) % 251
+
+    return (a, b)
+
+
+def verify_checksum(packet: bytes) -> bool:
+    """Verify packet checksum."""
+    if len(packet) < 6:
+        return False
+    a, b = compute_checksum(packet[:-2])
+    return packet[-2] == a and packet[-1] == b
+
+
 @dataclass
 class OrionPacket:
     packet_id: int
@@ -55,12 +78,5 @@ class OrionPacket:
     def encode(self) -> bytes:
         length = len(self.data)
         payload = struct.pack(">BBBB", ORION_SYNC0, ORION_SYNC1, self.packet_id, length) + self.data
-        
-        # Fletcher-16 Checksum (modified mod 251)
-        a, b = 1, 1
-        for byte in payload:
-            a = (a + byte) % 251
-            b = (b + a) % 251
-            
-        checksum = (b << 8) | a
-        return payload + struct.pack(">H", checksum)
+        a, b = compute_checksum(payload)
+        return payload + bytes([a, b])

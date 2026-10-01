@@ -6,22 +6,51 @@ from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.faults import FaultEngine
 
 class GimbalState:
-    def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None):
+    def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None, initialized: bool = True):
         self.dt = dt
         self.physics = PhysicsEngine(dt)
         self.terrain = terrain_engine
         self.faults = FaultEngine()
         self.target_pan = 0.0
         self.target_tilt = 0.0
-        self.initialized = False
+        self.initialized = initialized
         self.camera_id = 0
         self.laser_power = 0.0  # 0.0 to 1.0
         self.is_faulty = False
         
-        # Camera State
+        # Camera State (Single KTnC Camera Setup)
         self.camera_zoom = 1.0
         self.camera_focus = 0.0
         self.camera_ready = True
+        self.cameras = [
+            {
+                "type": 1,  # OrionCameraType_t.CAMERA_TYPE_VISIBLE
+                "proto": 7,  # OrionCameraProtocol_t.CAMERA_PROTO_KTNC
+                "min_focal": 4.3,
+                "max_focal": 129.0,
+                "pixel_pitch": 0.00225,
+                "width": 1920,
+                "height": 1080,
+                "align_min": (0, 0),
+                "align_max": (0, 0),
+            }
+        ]
+
+        # OrionKtnc Specific Settings
+        self.ktnc_index = 0
+        self.ktnc_integration_time = -1
+        self.ktnc_aperture = -1.0
+        self.ktnc_sharpness = 8
+        self.ktnc_vertical_flip = 0
+        self.ktnc_exposure_comp = 7
+        self.ktnc_contrast = 8
+        self.ktnc_saturation = 14
+        self.ktnc_night_mode = 0
+        self.ktnc_has_max_exposure = 1
+        self.ktnc_max_exposure = 0.008
+        self.ktnc_version_major = 1
+        self.ktnc_version_minor = 0
+        self.ktnc_version_patch = 0
 
         # Configuration & Limits
         self.baud_rate = 115200
@@ -110,6 +139,24 @@ class GimbalState:
 
         elif packet.packet_id == OrionPktType.CAMERAS:
             return self.get_cameras_packet()
+
+        elif packet.packet_id == OrionPktType.KTNC_SETTINGS:
+            if len(packet.data) >= 16:
+                idx, it, ap, sh, vf, ec, ct, st = struct.unpack_from(">BhhBBBBB", packet.data, 0)
+                bf = packet.data[10]
+                me = struct.unpack_from(">H", packet.data, 11)[0]
+                self.ktnc_index = idx
+                self.ktnc_integration_time = it
+                self.ktnc_aperture = ap / 10.0
+                self.ktnc_sharpness = int(round(sh / 15.0))
+                self.ktnc_vertical_flip = vf
+                self.ktnc_exposure_comp = int(round(ec / 17.0))
+                self.ktnc_contrast = int(round(ct / 7.0))
+                self.ktnc_saturation = int(round(st / 7.0))
+                self.ktnc_night_mode = (bf >> 7) & 1
+                self.ktnc_has_max_exposure = (bf >> 5) & 1
+                self.ktnc_max_exposure = me / 1000000.0
+            return self.get_ktnc_settings_packet()
             
         return None
 
@@ -150,9 +197,45 @@ class GimbalState:
         return OrionPacket(OrionPktType.TRACK_OPTIONS, data).encode()
 
     def get_cameras_packet(self) -> bytes:
-        ids = [self.camera_id, 0]
-        data = struct.pack(f">B{len(ids)}B", len(ids), *ids)
-        return OrionPacket(OrionPktType.CAMERAS, data).encode()
+        num_cams = len(self.cameras)
+        data = bytearray(struct.pack(">BBBB", num_cams, 0, 0, 0))
+        for cam in self.cameras:
+            data.extend(struct.pack(
+                ">BBIIHHHhhhh",
+                cam["type"],
+                cam["proto"],
+                int(round(cam["min_focal"] * 1000)),
+                int(round(cam["max_focal"] * 1000)),
+                int(round(cam["pixel_pitch"] * 1000000)),
+                cam["width"],
+                cam["height"],
+                cam.get("align_min", (0, 0))[0],
+                cam.get("align_min", (0, 0))[1],
+                cam.get("align_max", (0, 0))[0],
+                cam.get("align_max", (0, 0))[1],
+            ))
+        return OrionPacket(OrionPktType.CAMERAS, bytes(data)).encode()
+
+    def get_ktnc_settings_packet(self) -> bytes:
+        bitfield = ((self.ktnc_night_mode & 1) << 7) | ((self.ktnc_has_max_exposure & 1) << 5)
+        aperture_encoded = int(round(self.ktnc_aperture * 10.0))
+        data = struct.pack(
+            ">BhhBBBBBBHBBB",
+            self.ktnc_index,
+            self.ktnc_integration_time,
+            aperture_encoded,
+            int(round(self.ktnc_sharpness * 15.0)),
+            self.ktnc_vertical_flip,
+            int(round(self.ktnc_exposure_comp * 17.0)),
+            int(round(self.ktnc_contrast * 7.0)),
+            int(round(self.ktnc_saturation * 7.0)),
+            bitfield,
+            int(round(self.ktnc_max_exposure * 1000000.0)),
+            self.ktnc_version_major,
+            self.ktnc_version_minor,
+            self.ktnc_version_patch,
+        )
+        return OrionPacket(OrionPktType.KTNC_SETTINGS, data).encode()
 
     def get_faults_packet(self) -> bytes:
         fault_ids = self.faults.get_active_fault_ids()
