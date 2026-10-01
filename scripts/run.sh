@@ -10,7 +10,7 @@ cd "$(dirname "$0")/../src"
 
 # Default values
 HOST="0.0.0.0"
-PORT="5000"
+PORT="8745"
 DT="0.1"
 DTED_PATH=""
 TILE_URL=""
