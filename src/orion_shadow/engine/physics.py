@@ -14,14 +14,21 @@ class PhysicsEngine:
         self.max_acc = 100.0 # deg/s^2
         self.damping = 0.95  # simplistic friction/damping
 
-    def step(self, target_pan: float, target_tilt: float):
+    def step(self, target_pan: float, target_tilt: float, continuous_pan: bool = True,
+             tilt_min: float = -80.0, tilt_max: float = 28.0):
         """Integrates physics one timestep forward."""
-        self._update_axis(self.pan, target_pan)
-        self._update_axis(self.tilt, target_tilt)
+        self._update_axis(self.pan, target_pan, continuous=continuous_pan)
+        self._update_axis(self.tilt, target_tilt, continuous=False, min_limit=tilt_min, max_limit=tilt_max)
 
-    def _update_axis(self, axis: Dict[str, float], target: float):
-        # Error to target
-        error = target - axis["pos"]
+    def _update_axis(self, axis: Dict[str, float], target: float, continuous: bool = False,
+                     min_limit: float = None, max_limit: float = None):
+        if continuous:
+            # Shortest angular distance wrapped to [-180, 180]
+            error = (target - axis["pos"] + 180.0) % 360.0 - 180.0
+        else:
+            if min_limit is not None and max_limit is not None:
+                target = max(min(target, max_limit), min_limit)
+            error = target - axis["pos"]
         
         # Simple Proportional control for acceleration
         desired_acc = error * 10.0 
@@ -40,6 +47,17 @@ class PhysicsEngine:
         
         # Update position: p = p + v*dt
         axis["pos"] += axis["vel"] * self.dt
+
+        if continuous:
+            axis["pos"] = (axis["pos"] + 180.0) % 360.0 - 180.0
+        else:
+            if min_limit is not None and max_limit is not None:
+                if axis["pos"] < min_limit:
+                    axis["pos"] = min_limit
+                    axis["vel"] = 0.0
+                elif axis["pos"] > max_limit:
+                    axis["pos"] = max_limit
+                    axis["vel"] = 0.0
         
         # Apply damping
         axis["vel"] *= self.damping

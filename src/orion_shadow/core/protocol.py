@@ -46,6 +46,7 @@ class OrionPktType:
     SENSOR_DATA = 0xD0
     GPS_DATA = 0xD1
     EXT_HEADING_DATA = 0xD2
+    GEOLOCATE_TELEMETRY_CORE = 0xD4
     UNIFIED_CAM_ERR_SETTINGS = 0xFD
 
 def compute_checksum(data: bytes) -> tuple:

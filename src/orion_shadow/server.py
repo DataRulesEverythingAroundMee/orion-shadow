@@ -106,7 +106,14 @@ class OrionServer:
         elif packet.packet_id == OrionPktType.CAMERA_CMD:
             if len(packet.data) >= 8:
                 zoom, focus = struct.unpack(">ff", packet.data[:8])
-                details.append(f"zoom={zoom:.2f}, focus={focus:.2f}")
+                details.append(f"zoom={zoom:.2f}x, focus={focus:.2f}")
+        elif packet.packet_id == OrionPktType.CAMERA_STATE:
+            if len(packet.data) >= 5:
+                zoom_raw, focus_raw = struct.unpack_from(">hh", packet.data, 0)
+                details.append(f"zoom={zoom_raw / 100.0:.2f}x, focus={focus_raw / 10000.0:.2f}")
+            elif len(packet.data) >= 8:
+                zoom, focus = struct.unpack(">ff", packet.data[:8])
+                details.append(f"zoom={zoom:.2f}x, focus={focus:.2f}")
         elif packet.packet_id == OrionPktType.LASER_CMD:
             if len(packet.data) >= 4:
                 power = struct.unpack(">f", packet.data[:4])[0]
@@ -119,6 +126,8 @@ class OrionServer:
             if len(packet.data) >= 12:
                 heading, roll, pitch = struct.unpack(">fff", packet.data[:12])
                 details.append(f"heading={heading:.1f}, roll={roll:.1f}, pitch={pitch:.1f}")
+        elif packet.packet_id == OrionPktType.GEOLOCATE_TELEMETRY_CORE:
+            details.append("geolocate telemetry core")
 
         detail_str = f" ({', '.join(details)})" if details else ""
         return f"{pkt_name} [0x{packet.packet_id:02X}, len={len(packet.data)}]{detail_str}"
@@ -231,6 +240,7 @@ class OrionServer:
             
             # 2. Broadcast Telemetry to all clients
             packets = [
+                self.state.get_geolocate_telemetry_core_packet(),
                 self.state.get_telemetry_packet(),
                 self.state.get_laser_state_packet(),
                 self.state.get_camera_state_packet(),

@@ -225,6 +225,151 @@ class TestOrionServerSdkPorts(unittest.TestCase):
             server.close()
             thread.join(timeout=1.0)
 
+    def test_geolocate_telemetry_core_broadcast(self):
+        udp_port = get_free_port()
+        tcp_port = get_free_port()
+        server = OrionServer(host="127.0.0.1", port=udp_port, tcp_port=tcp_port, dt=0.05, video_enabled=False)
+        thread = threading.Thread(target=lambda: asyncio.run(server.run()), daemon=True)
+        thread.start()
+        time.sleep(0.1)
+
+        try:
+            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            from orion_sdk.connection import OrionConnection
+            from orion_sdk.packets import GeolocateTelemetryCore
+
+            conn = OrionConnection.open_tcp("127.0.0.1", tcp_port)
+            received_geo_pkt = None
+            for _ in range(20):
+                pkt = conn.receive(timeout=0.2)
+                if isinstance(pkt, GeolocateTelemetryCore):
+                    received_geo_pkt = pkt
+                    break
+
+            conn.close()
+            self.assertIsNotNone(received_geo_pkt)
+            self.assertAlmostEqual(received_geo_pkt.pan, 0.0, places=2)
+            self.assertAlmostEqual(received_geo_pkt.tilt, 0.0, places=2)
+            import math
+            self.assertAlmostEqual(math.degrees(received_geo_pkt.hfov), 47.7, places=1)
+            self.assertAlmostEqual(math.degrees(received_geo_pkt.vfov), 28.0, places=0)
+            self.assertEqual(received_geo_pkt.mode, 16)
+        finally:
+            server.close()
+            thread.join(timeout=1.0)
+
+    def test_pan_continuous_and_tilt_range_limits(self):
+        udp_port = get_free_port()
+        tcp_port = get_free_port()
+        server = OrionServer(host="127.0.0.1", port=udp_port, tcp_port=tcp_port, dt=0.05, video_enabled=False)
+        thread = threading.Thread(target=lambda: asyncio.run(server.run()), daemon=True)
+        thread.start()
+        time.sleep(0.1)
+
+        try:
+            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            from orion_sdk.connection import OrionConnection
+            from orion_sdk.packets import OrionLimitsData
+            import math
+
+            conn = OrionConnection.open_tcp("127.0.0.1", tcp_port)
+
+            # Query LIMITS packet
+            conn.send(OrionLimitsData())
+            limits_pkt = None
+            for _ in range(20):
+                pkt = conn.receive(timeout=0.1)
+                if isinstance(pkt, OrionLimitsData):
+                    limits_pkt = pkt
+                    break
+
+            self.assertIsNotNone(limits_pkt)
+            self.assertAlmostEqual(math.degrees(limits_pkt.MinPos[1]), -80.0, places=1)
+            self.assertAlmostEqual(math.degrees(limits_pkt.MaxPos[1]), 28.0, places=1)
+            self.assertAlmostEqual(math.degrees(limits_pkt.MinPos[0]), -180.0, places=1)
+            self.assertAlmostEqual(math.degrees(limits_pkt.MaxPos[0]), 180.0, places=1)
+            self.assertAlmostEqual(limits_pkt.MaxPower[0], 75.0, places=0)
+            self.assertAlmostEqual(limits_pkt.ContCur[0], 0.625, places=2)
+            self.assertAlmostEqual(limits_pkt.PeakCur[0], 3.125, places=2)
+
+            # Test command outside tilt range (exceeds +28°)
+            cmd_high_tilt = OrionPacket(OrionPktType.CMD, struct.pack(">ff", 45.0, 50.0)).encode()
+            conn.send_raw(cmd_high_tilt)
+            time.sleep(0.1)
+            self.assertAlmostEqual(server.state.target_tilt, 28.0, places=2)
+
+            # Test command outside tilt range (below -80°)
+            cmd_low_tilt = OrionPacket(OrionPktType.CMD, struct.pack(">ff", 45.0, -95.0)).encode()
+            conn.send_raw(cmd_low_tilt)
+            time.sleep(0.1)
+            self.assertAlmostEqual(server.state.target_tilt, -80.0, places=2)
+
+            # Test continuous pan wrapping across 360° (190° -> -170°)
+            cmd_wrap_pan = OrionPacket(OrionPktType.CMD, struct.pack(">ff", 190.0, 0.0)).encode()
+            conn.send_raw(cmd_wrap_pan)
+            time.sleep(0.1)
+            self.assertAlmostEqual(server.state.target_pan, -170.0, places=2)
+
+            conn.close()
+        finally:
+            server.close()
+            thread.join(timeout=1.0)
+
+    def test_camera_zoom_optical_and_digital_limits(self):
+        udp_port = get_free_port()
+        tcp_port = get_free_port()
+        server = OrionServer(host="127.0.0.1", port=udp_port, tcp_port=tcp_port, dt=0.05, video_enabled=False)
+        thread = threading.Thread(target=lambda: asyncio.run(server.run()), daemon=True)
+        thread.start()
+        time.sleep(0.1)
+
+        try:
+            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            from orion_sdk.connection import OrionConnection
+            from orion_sdk.packets import OrionCameraState, GeolocateTelemetryCore
+            import math
+
+            conn = OrionConnection.open_tcp("127.0.0.1", tcp_port)
+
+            # 1. Command 30x optical zoom
+            conn.send(OrionCameraState(Zoom=30.0))
+            time.sleep(0.15)
+            self.assertAlmostEqual(server.state.camera_zoom, 30.0, places=1)
+
+            # Receive telemetry and verify HFOV at 30x optical zoom (~1.7°–1.8°)
+            found_30 = False
+            for _ in range(30):
+                pkt = conn.receive(timeout=0.1)
+                if isinstance(pkt, GeolocateTelemetryCore) and math.degrees(pkt.hfov) < 2.0:
+                    self.assertAlmostEqual(math.degrees(pkt.hfov), 1.7, places=1)
+                    found_30 = True
+                    break
+            self.assertTrue(found_30)
+
+            # 2. Command 112x total zoom (digital zoom)
+            conn.send(OrionCameraState(Zoom=112.0))
+            time.sleep(0.15)
+            self.assertAlmostEqual(server.state.camera_zoom, 112.0, places=1)
+
+            found_112 = False
+            for _ in range(30):
+                pkt = conn.receive(timeout=0.1)
+                if isinstance(pkt, GeolocateTelemetryCore) and math.degrees(pkt.hfov) < 1.0:
+                    self.assertAlmostEqual(math.degrees(pkt.hfov), 0.45, places=1)
+                    found_112 = True
+                    break
+            self.assertTrue(found_112)
+
+            # 3. Command beyond 112x (should clamp to max_total_zoom = 112.0)
+            conn.send(OrionCameraState(Zoom=150.0))
+            time.sleep(0.1)
+            self.assertEqual(server.state.camera_zoom, 112.0)
+
+            conn.close()
+        finally:
+            server.close()
+            thread.join(timeout=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

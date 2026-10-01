@@ -131,7 +131,7 @@ class TestADSBAttach(unittest.TestCase):
         self.assertAlmostEqual(server.state.gps_lon, -118.54321, places=4)
         self.assertAlmostEqual(server.state.gps_alt, 3500.0, places=1)
         self.assertAlmostEqual(server.state.aircraft_heading, 180.0, places=1)
-        self.assertAlmostEqual(server.state.target_tilt, 45.0, places=1)
+        self.assertAlmostEqual(server.state.target_tilt, 20.0, places=1)
 
         bridge.close()
 
