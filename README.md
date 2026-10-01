@@ -4,7 +4,7 @@ A high-fidelity Software-in-the-Loop (SIL) and Hardware-in-the-Loop (HIL) simula
 
 ## 🚀 Overview
 
-The **OrionShadow** replicates the communication behavior of an Orion gimbal by implementing the `OrionPublic` protocol. It acts as a TCP/IP server that accepts commands from the Orion SDK and responds with realistic telemetry data, including gimbal positions, camera states, and sensor information.
+The **OrionShadow** replicates the communication behavior of an Orion gimbal by implementing the `OrionPublic` protocol. It acts as a UDP server that accepts commands from the Orion SDK and responds with realistic telemetry data, including gimbal positions, camera states, and sensor information.
 
 ### Key Features
 
@@ -49,9 +49,9 @@ Simulates the internal logic of the Orion Crown board.
 • **Telemetry**: Tracks the "current" physical position of the gimbal, which is updated based on physics integration.
 
 ### 5. Communication Layer (`orion_shadow.server`)
-An asynchronous TCP/IP server that maintains connections with multiple SDK clients.
-• **Concurrency**: Uses `asyncio` to handle multiple clients simultaneously.
-• **Multiplexing**: Broadcasts telemetry updates to all connected clients to mimic real hardware behavior.
+An asynchronous UDP server that maintains communication with multiple SDK clients.
+• **Concurrency**: Uses `asyncio` DatagramProtocol to handle multiple clients simultaneously.
+• **Multiplexing**: Broadcasts telemetry updates to all registered clients to mimic real hardware behavior.
 
 ### 6. Telemetry Engine (`orion_shadow.telemetry`)
 A periodic task that generates and pushes state packets.
@@ -94,7 +94,7 @@ pip install -e .
 ```
 
 ### 3. Running the Simulator
-Start the simulator as a TCP server. You can adjust the physics timestep (`--dt`) to increase or decrease simulation fidelity.
+Start the simulator as a UDP server. You can adjust the physics timestep (`--dt`) to increase or decrease simulation fidelity.
 
 To enable terrain-aware simulation, provide the path to your DTED data using the `--dted-path` flag.
 

@@ -8,7 +8,7 @@ OrionShadow is a digital twin of the Trillium Engineering Orion gimbal. It provi
 
 ### Key Simulation Parameters
 - **Protocol**: `OrionPublic` (v1.3.0.a)
-- **Communication**: TCP/IP (simulated Ethernet/Serial)
+- **Communication**: UDP (simulated Ethernet/Serial)
 - **Physics Integration**: $dt$-based (default 0.1s)
 - **Endianness**: Big-endian (Network Byte Order)
 
@@ -74,14 +74,14 @@ The simulator uses a basic Euler integration approach for each axis (Pan/Tilt):
 | **Commands ignored** | Incorrect Packet ID | Ensure you are using `0x01` for commands and `0x00` for initialization. |
 
 ### Debugging Tools
-- **Wireshark**: Use the `Orion-Wireshark.lua` plugin (found in the original Orion SDK) to inspect the TCP/IP stream.
+- **Wireshark**: Use the `Orion-Wireshark.lua` plugin (found in the original Orion SDK) to inspect the UDP stream.
 - **Logging**: Enable verbose logging in your SDK client to monitor the raw byte sequences being transmitted.
 
 ---
 
 ## 📝 Integration Checklist
 
-- [ ] Ensure the connection is established via TCP/IP.
+- [ ] Ensure the connection is established via UDP.
 - [ ] Send an `ORION_PKT_INITIALIZE` (0x00) packet immediately after connection.
 - [ ] Verify that the client is using **Big-endian** byte order.
 - [ ] Confirm the Fletcher-251 checksum is applied to every outgoing packet.
