@@ -286,7 +286,6 @@ class OrionServer:
             # 2. Broadcast Telemetry to all clients
             slow_generators = [
                 self.state.get_laser_state_packet,
-                self.state.get_sensor_data_packet,
                 self.state.get_diagnostics_packet,
                 self.state.get_video_options_packet,
                 self.state.get_tracking_options_packet,

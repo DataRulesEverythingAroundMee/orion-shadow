@@ -279,8 +279,9 @@ class GimbalState:
         self.uptime += self.dt
 
     def get_telemetry_packet(self) -> bytes:
-        pos_data = struct.pack(">ff", self.physics.pan["pos"], self.physics.tilt["pos"])
-        return OrionPacket(OrionPktType.POSITIONS, pos_data).encode()
+        # OrionPositions packet (Orion SDK 3.1.9, Packet ID: 10, min len 1, max len 49)
+        # Stored presets: NumPositions=0 (1 byte payload)
+        return OrionPacket(OrionPktType.POSITIONS, struct.pack(">B", 0)).encode()
 
     def get_laser_state_packet(self) -> bytes:
         # OrionLaserStates packet (Orion SDK 3.1.9, Packet ID: 6, min len 1, max len 19)
@@ -305,8 +306,8 @@ class GimbalState:
         # OrionSensorData packet (Orion SDK 3.1.9, Packet ID: 208, min len 22, max len 29)
         uptime_ms = int(self.uptime * 1000) & 0xFFFFFFFF
         dt_us = int(self.dt * 1000000) & 0xFFFF
-        counter = getattr(self, "_sensor_counter", 0) + 1
-        self._sensor_counter = counter & 0xFF
+        counter = (getattr(self, "_sensor_counter", 0) + 1) & 0xFF
+        self._sensor_counter = counter
         baro_raw = int(round(101325.0 * 0.02))  # 1013.25 hPa
         oat_raw = int(round((15.0 + 273.15) * 100.0))  # 15°C
         gyro_temp_raw = int(round((25.0 + 273.15) * 100.0))  # 25°C
