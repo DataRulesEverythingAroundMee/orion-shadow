@@ -4,11 +4,11 @@ A high-fidelity Software-in-the-Loop (SIL) and Hardware-in-the-Loop (HIL) simula
 
 ## 🚀 Overview
 
-The **OrionShadow** replicates the communication behavior of an Orion gimbal by implementing the `OrionPublic` protocol. It acts as a UDP server that accepts commands from the Orion SDK and responds with realistic telemetry data, including gimbal positions, camera states, and sensor information.
+The **OrionShadow** replicates the communication behavior of an Orion gimbal by implementing the `OrionPublic` protocol (targeting Orion SDK 3.1.9). It acts as a UDP server that accepts commands from the Orion SDK and responds with realistic telemetry data, including gimbal positions, camera states, and sensor information.
 
 ### Key Features
 
-• **Protocol Compliance**: Full implementation of the OrionPublic protocol, including big-endian packet framing and modified 16-bit Fletcher checksums.
+• **Protocol Compliance**: Full implementation of the OrionPublic protocol (targeting Orion SDK 3.1.9 / Protocol 1.4.0), including big-endian packet framing and modified 16-bit Fletcher checksums.
 • **SIL (Software-in-the-Loop)**: Simulate the complete logic of the gimbal's internal state machine, including motor modes, fault states, and command echoing.
 • **HIL (Hardware-in-the-Loop)**: Provides a stable network interface for testing physical controllers or embedded systems in a controlled environment.
 • **Physics-Driven Dynamics**: Moves via simulated inertia, acceleration, and velocity clamping rather than instant position jumps.
@@ -62,7 +62,7 @@ A periodic task that generates and pushes state packets.
 
 ## 📦 Packet Specification
 
-The simulator adheres to the `OrionPublicProtocol` version `1.3.0.a`.
+The simulator adheres to the `OrionPublicProtocol` version `1.4.0` (targeting `orion-sdk` version `3.1.9`).
 
 ### General Packet Format
 

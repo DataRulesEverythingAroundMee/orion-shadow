@@ -7,7 +7,8 @@ This document provides technical details for engineers integrating with the Orio
 OrionShadow is a digital twin of the Trillium Engineering Orion gimbal. It provides a high-fidelity simulation environment for Software-in-the-Loop (SIL) and Hardware-in-the-Loop (HIL) testing.
 
 ### Key Simulation Parameters
-- **Protocol**: `OrionPublic` (v1.3.0.a)
+- **Target SDK**: `Orion SDK` (v3.1.9)
+- **Protocol**: `OrionPublic` (v1.4.0)
 - **Communication**: UDP (simulated Ethernet/Serial)
 - **Physics Integration**: $dt$-based (default 0.1s)
 - **Endianness**: Big-endian (Network Byte Order)
@@ -74,7 +75,7 @@ The simulator uses a basic Euler integration approach for each axis (Pan/Tilt):
 | **Commands ignored** | Incorrect Packet ID | Ensure you are using `0x01` for commands and `0x00` for initialization. |
 
 ### Debugging Tools
-- **Wireshark**: Use the `Orion-Wireshark.lua` plugin (found in the original Orion SDK) to inspect the UDP stream.
+- **Wireshark**: Use the `OrionPublic.lua` dissector (found in Orion SDK 3.1.9 under `wireshark/`) to inspect the UDP stream.
 - **Logging**: Enable verbose logging in your SDK client to monitor the raw byte sequences being transmitted.
 
 ---

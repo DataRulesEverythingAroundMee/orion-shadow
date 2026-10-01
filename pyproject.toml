@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "orion-shadow"
 version = "0.1.0"
-description = "Orion Gimbal & Camera Simulator for SIL/HIL testing"
+description = "Orion Gimbal & Camera Simulator for SIL/HIL testing (targeting Orion SDK 3.1.9)"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [

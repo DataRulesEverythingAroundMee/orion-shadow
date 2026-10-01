@@ -7,8 +7,13 @@ class ProtocolEngine:
             0x00: "ORION_PKT_INITIALIZE",
             0x01: "ORION_PKT_CMD",
             0x0A: "ORION_PKT_POSITIONS",
+            0x4A: "ORION_PKT_BOARD_HEARTBEAT",
+            0x5F: "ORION_PKT_ADVANCED_ENCODING",
             0x63: "ORION_PKT_CAMERAS",
-            0xD0: "ORION_PKT_SENSOR_DATA"
+            0x7A: "ORION_PKT_SIONYX_SETTINGS",
+            0x7B: "ORION_PKT_LYNRED_SETTINGS",
+            0xD0: "ORION_PKT_SENSOR_DATA",
+            0xFD: "ORION_PKT_UNIFIED_CAM_ERR_SETTINGS",
         }
 
     def parse(self, raw_data: bytes) -> OrionPacket:

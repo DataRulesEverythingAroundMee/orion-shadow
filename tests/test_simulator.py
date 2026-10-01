@@ -1,7 +1,7 @@
 import pytest
 import struct
 import asyncio
-from orion_shadow.core.protocol import OrionPacket, OrionPktType
+from orion_shadow.core.protocol import OrionPacket, OrionPktType, TARGET_SDK_VERSION, PROTOCOL_VERSION
 from orion_shadow.core.engine import ProtocolEngine
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.physics import PhysicsEngine
@@ -91,3 +91,19 @@ def test_telemetry_packet_format():
     pan, tilt = struct.unpack(">ff", parsed.data)
     assert abs(pan - 12.34) < 0.001
     assert abs(tilt - (-56.78)) < 0.001
+
+def test_target_orion_sdk_version():
+    assert TARGET_SDK_VERSION == "3.1.9"
+    assert PROTOCOL_VERSION == "1.4.0"
+    assert OrionPktType.BOARD_HEARTBEAT == 0x4A
+    assert OrionPktType.ADVANCED_ENCODING == 0x5F
+    assert OrionPktType.SIONYX_SETTINGS == 0x7A
+    assert OrionPktType.LYNRED_SETTINGS == 0x7B
+    assert OrionPktType.UNIFIED_CAM_ERR_SETTINGS == 0xFD
+
+    engine = ProtocolEngine()
+    assert engine.packet_id_map[0x4A] == "ORION_PKT_BOARD_HEARTBEAT"
+    assert engine.packet_id_map[0x5F] == "ORION_PKT_ADVANCED_ENCODING"
+    assert engine.packet_id_map[0x7A] == "ORION_PKT_SIONYX_SETTINGS"
+    assert engine.packet_id_map[0x7B] == "ORION_PKT_LYNRED_SETTINGS"
+    assert engine.packet_id_map[0xFD] == "ORION_PKT_UNIFIED_CAM_ERR_SETTINGS"

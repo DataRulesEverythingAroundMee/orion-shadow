@@ -3,6 +3,10 @@ from dataclasses import dataclass
 
 # --- Constants & Enumerations ---
 
+# Protocol & SDK Target Versions
+TARGET_SDK_VERSION = "3.1.9"
+PROTOCOL_VERSION = "1.4.0"
+
 ORION_SYNC0 = 0xD0
 ORION_SYNC1 = 0x0D
 
@@ -18,16 +22,20 @@ class OrionPktType:
     LIMITS = 0x22
     DIAGNOSTICS = 0x41
     FAULTS = 0x42
+    BOARD_HEARTBEAT = 0x4A
+    ADVANCED_ENCODING = 0x5F
     CAMERA_SWITCH = 0x60
     CAMERA_STATE = 0x61
     CAMERA_CMD = 0x62
     CAMERAS = 0x63
     VIDEO_OPTIONS = 0x70
-
     TRACK_OPTIONS = 0x71
+    SIONYX_SETTINGS = 0x7A
+    LYNRED_SETTINGS = 0x7B
     SENSOR_DATA = 0xD0
     GPS_DATA = 0xD1
     EXT_HEADING_DATA = 0xD2
+    UNIFIED_CAM_ERR_SETTINGS = 0xFD
 
 @dataclass
 class OrionPacket:
