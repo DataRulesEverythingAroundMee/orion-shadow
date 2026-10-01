@@ -84,7 +84,7 @@ class OrionServer:
                 details.append(f"pan={pan:.2f}, tilt={tilt:.2f}")
             elif len(packet.data) >= 4:
                 pan_raw, tilt_raw = struct.unpack(">hh", packet.data[:4])
-                details.append(f"pan={pan_raw/1000.0:.2f}, tilt={tilt_raw/1000.0:.2f}")
+                details.append(f"pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
         elif packet.packet_id == OrionPktType.CAMERAS:
             if len(packet.data) <= 4:
                 details.append("request camera settings")

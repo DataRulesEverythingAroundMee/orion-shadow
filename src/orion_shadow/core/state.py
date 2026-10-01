@@ -104,6 +104,18 @@ class GimbalState:
         self.error_count = 0
         self.fault_count = 0
 
+    @property
+    def current_pan(self) -> float:
+        if hasattr(self, 'physics') and isinstance(self.physics.pan, dict) and 'pos' in self.physics.pan:
+            return float(self.physics.pan['pos'])
+        return float(getattr(self, 'target_pan', 0.0))
+
+    @property
+    def current_tilt(self) -> float:
+        if hasattr(self, 'physics') and isinstance(self.physics.tilt, dict) and 'pos' in self.physics.tilt:
+            return float(self.physics.tilt['pos'])
+        return float(getattr(self, 'target_tilt', 0.0))
+
     def update_from_command(self, packet: OrionPacket) -> Optional[OrionPacket]:
         if packet.packet_id == OrionPktType.INITIALIZE:
             self.initialized = True
@@ -122,7 +134,7 @@ class GimbalState:
                 self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
             elif len(packet.data) >= 4:
                 pan_raw, tilt_raw = struct.unpack(">hh", packet.data[:4])
-                pan, tilt = pan_raw / 1000.0, tilt_raw / 1000.0
+                pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
                 self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
                 self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
         
