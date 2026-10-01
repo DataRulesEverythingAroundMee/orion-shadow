@@ -48,7 +48,23 @@ class OrionPktType:
     GPS_DATA = 0xD1
     EXT_HEADING_DATA = 0xD2
     GEOLOCATE_TELEMETRY_CORE = 0xD4
+    GEOPOINT_CMD = 0xD5
     UNIFIED_CAM_ERR_SETTINGS = 0xFD
+
+class OrionMode:
+    DISABLED = 0x00
+    FAULT = 0x01
+    RATE = 0x10
+    GEO_RATE = 0x11
+    SCENE = 0x30
+    TRACK = 0x31
+    CALIBRATION = 0x40
+    NULL_GYROS = 0x41
+    POSITION = 0x50
+    POSITION_NO_LIMITS = 0x51
+    GEOPOINT = 0x60
+    PATH = 0x70
+    DOWN = 0x71
 
 def compute_checksum(data: bytes) -> tuple:
     """Compute Fletcher's checksum (mod 251) matching Orion SDK TrilliumPacket.c."""

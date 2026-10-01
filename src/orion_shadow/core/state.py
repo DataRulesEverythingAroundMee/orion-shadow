@@ -1,7 +1,7 @@
 import struct
 import math
-from typing import Dict, Optional
-from orion_shadow.core.protocol import OrionPacket, OrionPktType
+from typing import Dict, Optional, Tuple
+from orion_shadow.core.protocol import OrionPacket, OrionPktType, OrionMode
 from orion_shadow.engine.physics import PhysicsEngine
 from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.faults import FaultEngine
@@ -32,9 +32,18 @@ class GimbalState:
         self.target_pan = self.initial_pan
         self.target_tilt = self.initial_tilt
         self.initialized = initialized
+        self.mode = OrionMode.RATE if initialized else OrionMode.DISABLED
         self.camera_id = 0
         self.laser_power = 0.0  # 0.0 to 1.0
         self.is_faulty = False
+
+        # Geopoint Mode State (ORION_MODE_GEOPOINT: 0x60 / 96)
+        self.geopoint_lat = 0.0
+        self.geopoint_lon = 0.0
+        self.geopoint_alt = 0.0
+        self.geopoint_vel_ned = [0.0, 0.0, 0.0]
+        self.geopoint_joystick_range = 0.0
+        self.geopoint_options = 0
         
         # Camera State (Trillium HD40-XV Single Visible Camera Setup)
         self.camera_zoom = 1.0
@@ -165,6 +174,8 @@ class GimbalState:
                 else:
                     # Legacy 4-byte payload without mode byte (treat as position mode)
                     mode = 0x50
+
+                self.mode = mode
 
                 # Rate modes: ORION_MODE_RATE (0x10), ORION_MODE_GEO_RATE (0x11), ORION_MODE_SCENE (0x30)
                 if mode in (0x10, 0x11, 0x30):
@@ -361,10 +372,130 @@ class GimbalState:
 
         elif packet.packet_id == OrionPktType.GEOLOCATE_TELEMETRY_CORE:
             return self.get_geolocate_telemetry_core_packet()
+
+        elif packet.packet_id == OrionPktType.GEOPOINT_CMD:
+            target_lat, target_lon, target_alt = None, None, None
+            vel_ned = [0.0, 0.0, 0.0]
+            joystick_range = 0.0
+            options = 0
+
+            if len(packet.data) >= 18:
+                raw_lat, raw_lon, raw_alt, vn_raw, ve_raw, vd_raw = struct.unpack_from(">iiihhh", packet.data, 0)
+                # targetLat in radians * 572957795.1308233 is degrees * 10000000 (1e7)
+                target_lat = raw_lat / 10000000.0
+                target_lon = raw_lon / 10000000.0
+                target_alt = raw_alt / 10000.0
+                vel_ned = [vn_raw / 100.0, ve_raw / 100.0, vd_raw / 100.0]
+                if len(packet.data) >= 20:
+                    joystick_range = float(struct.unpack_from(">H", packet.data, 18)[0])
+                if len(packet.data) >= 21:
+                    options = packet.data[20]
+            elif len(packet.data) >= 12:
+                # Float32 fallback
+                target_lat, target_lon, target_alt = struct.unpack(">fff", packet.data[:12])
+
+            if target_lat is not None:
+                if self.mode == OrionMode.GEOPOINT and joystick_range > 0:
+                    # In joystick velocity mode, update velocity and options only
+                    self.geopoint_vel_ned = vel_ned
+                    self.geopoint_options = options
+                    self.geopoint_joystick_range = joystick_range
+                else:
+                    self.geopoint_lat = float(target_lat)
+                    self.geopoint_lon = float(target_lon)
+                    self.geopoint_alt = float(target_alt)
+                    self.geopoint_vel_ned = [float(v) for v in vel_ned]
+                    self.geopoint_joystick_range = joystick_range
+                    self.geopoint_options = options
+
+                self.mode = OrionMode.GEOPOINT
+                target_pan, target_tilt = self.calculate_geopoint_pan_tilt()
+                self.target_pan = target_pan
+                self.target_tilt = target_tilt
+
+                # If closure mode requested (options bit 1 set), immediately achieve pointing
+                if options & 0x02:
+                    self.physics.pan["pos"] = target_pan
+                    self.physics.tilt["pos"] = target_tilt
+                    self.physics.pan["vel"] = 0.0
+                    self.physics.tilt["vel"] = 0.0
+
+            return self.get_geopoint_cmd_packet()
             
         return None
 
+    def calculate_geopoint_pan_tilt(self) -> Tuple[float, float]:
+        """
+        Calculate the required pan and tilt angles (degrees) so the camera boresight
+        locks directly onto (self.geopoint_lat, self.geopoint_lon, self.geopoint_alt)
+        from current aircraft position and attitude.
+        """
+        d_lat = self.geopoint_lat - self.gps_lat
+        d_lon = self.geopoint_lon - self.gps_lon
+        lat_m = (self.gps_lat + self.geopoint_lat) / 2.0
+        cos_lat = math.cos(math.radians(lat_m))
+
+        north_m = d_lat * 111320.0
+        east_m = d_lon * 111320.0 * (cos_lat if abs(cos_lat) > 1e-6 else 1.0)
+        down_m = self.gps_alt - self.geopoint_alt
+        ground_dist = math.hypot(north_m, east_m)
+
+        if ground_dist < 1e-3:
+            # Target is directly above or below
+            elevation = -90.0 if down_m > 0 else 90.0
+            azimuth = self.aircraft_heading
+        else:
+            azimuth = (math.degrees(math.atan2(east_m, north_m)) + 360.0) % 360.0
+            elevation = math.degrees(math.atan2(-down_m, ground_dist))
+
+        # Camera heading = aircraft_heading + pan  =>  pan = azimuth - aircraft_heading
+        pan = (azimuth - self.aircraft_heading + 180.0) % 360.0 - 180.0
+        # Camera pitch = aircraft_pitch + tilt  =>  tilt = elevation - aircraft_pitch
+        tilt = elevation - self.aircraft_pitch
+
+        if self.pan_continuous:
+            pan = (pan + 180.0) % 360.0 - 180.0
+        else:
+            pan = max(min(pan, self.pan_max), self.pan_min)
+        tilt = max(min(tilt, self.tilt_max), self.tilt_min)
+
+        return pan, tilt
+
+    def get_geopoint_cmd_packet(self) -> bytes:
+        lat_raw = int(round(self.geopoint_lat * 10000000.0))
+        lon_raw = int(round(self.geopoint_lon * 10000000.0))
+        alt_raw = int(round(self.geopoint_alt * 10000.0))
+        vn_raw = int(round(self.geopoint_vel_ned[0] * 100.0))
+        ve_raw = int(round(self.geopoint_vel_ned[1] * 100.0))
+        vd_raw = int(round(self.geopoint_vel_ned[2] * 100.0))
+        rng_raw = int(round(self.geopoint_joystick_range)) & 0xFFFF
+        data = struct.pack(">iiihhhHB", lat_raw, lon_raw, alt_raw, vn_raw, ve_raw, vd_raw, rng_raw, self.geopoint_options & 0xFF)
+        return OrionPacket(OrionPktType.GEOPOINT_CMD, data).encode()
+
     def step(self):
+        # Advance simulated aircraft position along heading if speed > 0 and no external GPS active
+        if not self.gps_received and self.aircraft_speed > 0.0:
+            speed_mps = self.aircraft_speed / 1.94384
+            dist_m = speed_mps * self.dt
+            hdg_rad = math.radians(self.aircraft_heading)
+            self.gps_lat += (dist_m * math.cos(hdg_rad)) / 111320.0
+            cos_lat = math.cos(math.radians(self.gps_lat))
+            self.gps_lon += (dist_m * math.sin(hdg_rad)) / (111320.0 * (cos_lat if abs(cos_lat) > 1e-6 else 1.0))
+
+        # Propagate target and update lock pan/tilt if in GEOPOINT mode
+        if self.mode == OrionMode.GEOPOINT:
+            if any(v != 0.0 for v in self.geopoint_vel_ned):
+                vn, ve, vd = self.geopoint_vel_ned
+                d_lat = (vn * self.dt) / 111320.0
+                cos_lat = math.cos(math.radians(self.geopoint_lat))
+                d_lon = (ve * self.dt) / (111320.0 * (cos_lat if abs(cos_lat) > 1e-6 else 1.0))
+                d_alt = -vd * self.dt
+                self.geopoint_lat += d_lat
+                self.geopoint_lon += d_lon
+                self.geopoint_alt += d_alt
+
+            self.target_pan, self.target_tilt = self.calculate_geopoint_pan_tilt()
+
         self.physics.step(
             self.target_pan, 
             self.target_tilt, 
@@ -378,14 +509,6 @@ class GimbalState:
             self.terrain_alt = terrain_alt
             if self.gps_alt == 0.0:
                 self.gps_alt = terrain_alt
-        # Advance simulated aircraft position along heading if speed > 0 and no external GPS active
-        if not self.gps_received and self.aircraft_speed > 0.0:
-            speed_mps = self.aircraft_speed / 1.94384
-            dist_m = speed_mps * self.dt
-            hdg_rad = math.radians(self.aircraft_heading)
-            self.gps_lat += (dist_m * math.cos(hdg_rad)) / 111320.0
-            cos_lat = math.cos(math.radians(self.gps_lat))
-            self.gps_lon += (dist_m * math.sin(hdg_rad)) / (111320.0 * (cos_lat if abs(cos_lat) > 1e-6 else 1.0))
         self.uptime += self.dt
 
     def get_telemetry_packet(self) -> bytes:
@@ -607,13 +730,13 @@ class GimbalState:
         pan_rad = math.radians(self.physics.pan["pos"])
         tilt_rad = math.radians(self.physics.tilt["pos"])
 
-        # Mode: 1 if faulty, 0 if disabled, 16 if rate
+        # Mode: 1 if faulty, 0 if disabled, otherwise current state mode
         if self.is_faulty or bool(self.faults.active_faults):
             mode = 1
         elif not self.initialized:
             mode = 0
         else:
-            mode = 16
+            mode = getattr(self, 'mode', 16)
 
         # Camera FOV calculation
         if self.cameras:
@@ -633,6 +756,24 @@ class GimbalState:
             hfov_rad = math.radians(47.7)
             vfov_rad = math.radians(28.0)
 
+        # Compute line-of-sight ECEF vector if in GEOPOINT mode
+        if mode == 0x60:  # ORION_MODE_GEOPOINT
+            lat_rad_g = math.radians(self.gps_lat)
+            lon_rad_g = math.radians(self.gps_lon)
+            dlat_m = (self.geopoint_lat - self.gps_lat) * 111320.0
+            dlon_m = (self.geopoint_lon - self.gps_lon) * 111320.0 * math.cos(lat_rad_g)
+            dalt_m = -(self.geopoint_alt - self.gps_alt)
+            s_lat, c_lat = math.sin(lat_rad_g), math.cos(lat_rad_g)
+            s_lon, c_lon = math.sin(lon_rad_g), math.cos(lon_rad_g)
+            ecef_x = -s_lat * c_lon * dlat_m - s_lon * dlon_m - c_lat * c_lon * dalt_m
+            ecef_y = -s_lat * s_lon * dlat_m + c_lon * dlon_m - c_lat * s_lon * dalt_m
+            ecef_z = c_lat * dlat_m - s_lat * dalt_m
+            los_x = int(round(max(-32767, min(32767, ecef_x))))
+            los_y = int(round(max(-32767, min(32767, ecef_y))))
+            los_z = int(round(max(-32767, min(32767, ecef_z))))
+        else:
+            los_x, los_y, los_z = 0, 0, 0
+
         data = bytearray()
         data.extend(struct.pack(">IIHh", uptime_ms, 0, 0, 0))
         data.extend(struct.pack(">iii", int(round(lat_rad * 572957795.1308)), int(round(lon_rad * 572957795.1308)), int(round(alt_m * 10000.0))))
@@ -640,7 +781,7 @@ class GimbalState:
         data.extend(struct.pack(">hhhh", 32767, 0, 0, 0))  # gimbalQuat
         data.extend(struct.pack(">hh", int(round(pan_rad * 10430.06004058)), int(round(tilt_rad * 10430.06004058))))
         data.extend(struct.pack(">HH", int(round(hfov_rad * 10430.21919553)), int(round(vfov_rad * 10430.21919553))))
-        data.extend(struct.pack(">hhh", 0, 0, 0))  # losECEF
+        data.extend(struct.pack(">hhh", los_x, los_y, los_z))  # losECEF
         data.extend(struct.pack(">HH", width, height))
         data.extend(struct.pack(">BBBBB", mode, 0, 0, 0, 0))  # mode, pathProgress, stareTime, pathFrom, pathTo
         data.extend(struct.pack(">ii", 0, 0))  # imageShifts

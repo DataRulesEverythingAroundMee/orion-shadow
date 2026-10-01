@@ -31,8 +31,8 @@ class TestInitialPosition(unittest.TestCase):
         self.assertAlmostEqual(state.gps_lon, -84.0819, places=4)
         self.assertAlmostEqual(state.gps_alt, 1000.0, places=1)
         # Automatic default tilt for airborne camera
-        self.assertAlmostEqual(state.target_tilt, -45.0, places=1)
-        self.assertAlmostEqual(state.current_tilt, -45.0, places=1)
+        self.assertAlmostEqual(state.target_tilt, -20.0, places=1)
+        self.assertAlmostEqual(state.current_tilt, -20.0, places=1)
         self.assertFalse(state.gps_received)
 
     def test_custom_tilt_and_pan_override(self):
@@ -101,8 +101,8 @@ class TestInitialPosition(unittest.TestCase):
         self.assertAlmostEqual(telem['lat'], 39.7774, places=4)
         self.assertAlmostEqual(telem['lon'], -84.0819, places=4)
         self.assertAlmostEqual(telem['alt'], 1000.0, places=1)
-        self.assertAlmostEqual(telem['tilt'], -45.0, places=1)
-        self.assertAlmostEqual(telem['cam_pitch'], -45.0, places=1)
+        self.assertAlmostEqual(telem['tilt'], -20.0, places=1)
+        self.assertAlmostEqual(telem['cam_pitch'], -20.0, places=1)
 
         # Before any GPS packets arrive, mode is SIMULATOR
         self.assertFalse(state.gps_received)

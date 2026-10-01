@@ -30,6 +30,7 @@ class ProtocolEngine:
             0xD1: "ORION_PKT_GPS_DATA",
             0xD2: "ORION_PKT_EXT_HEADING_DATA",
             0xD4: "ORION_PKT_GEOLOCATE_TELEMETRY_CORE",
+            0xD5: "ORION_PKT_GEOPOINT_CMD",
             0xFD: "ORION_PKT_UNIFIED_CAM_ERR_SETTINGS",
         }
 

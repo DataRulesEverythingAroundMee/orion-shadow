@@ -202,6 +202,15 @@ class OrionServer:
                 details.append(f"heading={heading:.1f}, roll={roll:.1f}, pitch={pitch:.1f}")
         elif packet.packet_id == OrionPktType.GEOLOCATE_TELEMETRY_CORE:
             details.append("geolocate telemetry core")
+        elif packet.packet_id == OrionPktType.GEOPOINT_CMD:
+            if len(packet.data) >= 18:
+                raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 0)
+                details.append(f"target_lat={raw_lat*1e-7:.5f}, target_lon={raw_lon*1e-7:.5f}, target_alt={raw_alt/10000.0:.1f}m, mode=ORION_MODE_GEOPOINT (0x60)")
+            elif len(packet.data) >= 12:
+                lat, lon, alt = struct.unpack(">fff", packet.data[:12])
+                details.append(f"target_lat={lat:.5f}, target_lon={lon:.5f}, target_alt={alt:.1f}m, mode=ORION_MODE_GEOPOINT (0x60)")
+            else:
+                details.append("mode=ORION_MODE_GEOPOINT (0x60)")
 
         detail_str = f" ({', '.join(details)})" if details else ""
         return f"{pkt_name} [0x{packet.packet_id:02X}, len={len(packet.data)}]{detail_str}"
