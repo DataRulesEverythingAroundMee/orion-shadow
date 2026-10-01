@@ -409,7 +409,7 @@ class ADSBClient:
 class OrionBridge:
     """Maintains a UDP link to the Orion server and streams GPS, heading, and gimbal/camera packets."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = -45.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = -20.0):
         self.host = host
         self.port = port
         self.tilt_deg = tilt_deg
@@ -437,7 +437,7 @@ class OrionBridge:
 
                 # Send INITIALIZE packet so the server brings subsystems online
                 init_pkt = OrionPacket(OrionPktType.INITIALIZE, b"").encode()
-                # Send CMD packet to set camera tilt (default: -45 degrees)
+                # Send CMD packet to set camera tilt (default: -20 degrees)
                 cmd_payload = struct.pack(">ff", 0.0, float(self.tilt_deg))
                 cmd_pkt = OrionPacket(OrionPktType.CMD, cmd_payload).encode()
                 self.sock.sendto(init_pkt + cmd_pkt, (self.host, self.port))
@@ -502,10 +502,10 @@ class OrionBridge:
                         pass
                     self.sock = None
 
-    def send_aircraft_position(self, lat: float, lon: float, alt_meters: float, heading_deg: float) -> bool:
+    def send_aircraft_position(self, lat: float, lon: float, alt_meters: float, heading_deg: float, speed_kts: float = 0.0) -> bool:
         """
         Send GPS_DATA and EXT_HEADING_DATA packets to Orion server via UDP.
-        GPS_DATA payload: 3 floats (lat, lon, alt_meters) in Big-Endian.
+        GPS_DATA payload: 4 floats (lat, lon, alt_meters, speed_kts) in Big-Endian.
         EXT_HEADING_DATA payload: 3 floats (heading, roll=0.0, pitch=0.0) in Big-Endian.
         """
         if not self.is_connected:
@@ -517,8 +517,8 @@ class OrionBridge:
                 if not self.sock:
                     return False
 
-                # Pack GPS_DATA (packet_id 0xD1)
-                gps_payload = struct.pack(">fff", float(lat), float(lon), float(alt_meters))
+                # Pack GPS_DATA (packet_id 0xD1) - 4 floats (lat, lon, alt, speed)
+                gps_payload = struct.pack(">ffff", float(lat), float(lon), float(alt_meters), float(speed_kts))
                 gps_packet = OrionPacket(OrionPktType.GPS_DATA, gps_payload).encode()
 
                 # Pack EXT_HEADING_DATA (packet_id 0xD2)
@@ -707,9 +707,10 @@ class ADSBTrackerTUI:
         cur_lat, cur_lon = self.attached_aircraft.current_extrapolated_pos()
         alt_m = self.attached_aircraft.alt_meters
         track = self.attached_aircraft.track
+        speed_kts = self.attached_aircraft.speed
 
         # Send to Orion
-        success = self.bridge.send_aircraft_position(cur_lat, cur_lon, alt_m, track)
+        success = self.bridge.send_aircraft_position(cur_lat, cur_lon, alt_m, track, speed_kts)
         self.last_send_time = time.time()
 
         # Update flight trail breadcrumbs
@@ -718,7 +719,7 @@ class ADSBTrackerTUI:
             self.flight_trail.pop(0)
 
         if success:
-            self.status_message = f"[+] Sent fix to Orion: Lat {cur_lat:+.5f}, Lon {cur_lon:+.5f}, Alt {alt_m:.1f}m"
+            self.status_message = f"[+] Sent fix to Orion: Lat {cur_lat:+.5f}, Lon {cur_lon:+.5f}, Alt {alt_m:.1f}m, Spd {speed_kts:.0f}kts"
         else:
             self.status_message = f"[!] Failed to send to Orion ({self.bridge.last_error})"
 
@@ -1019,12 +1020,13 @@ def run_headless(args: argparse.Namespace):
             cur_lat, cur_lon = selected_ac.current_extrapolated_pos()
             alt_m = selected_ac.alt_meters
             track = selected_ac.track
+            speed_kts = selected_ac.speed
 
-            success = bridge.send_aircraft_position(cur_lat, cur_lon, alt_m, track)
+            success = bridge.send_aircraft_position(cur_lat, cur_lon, alt_m, track, speed_kts)
             count += 1
 
             status = "SENT" if success else f"FAIL ({bridge.last_error})"
-            print(f"[{count:04d}] [{status}] Target: {selected_ac.flight} -> Lat: {cur_lat:+.5f}°, Lon: {cur_lon:+.5f}°, Alt: {alt_m:.1f}m, Track: {track:.1f}°")
+            print(f"[{count:04d}] [{status}] Target: {selected_ac.flight} -> Lat: {cur_lat:+.5f}°, Lon: {cur_lon:+.5f}°, Alt: {alt_m:.1f}m, Track: {track:.1f}°, Speed: {speed_kts:.0f}kts")
 
             time.sleep(interval)
 
@@ -1055,7 +1057,7 @@ def main():
     parser.add_argument("--orion-host", type=str, default="127.0.0.1", help="Orion server IP or hostname")
     parser.add_argument("--orion-port", type=int, default=8745, help="Orion server UDP port (default: 8745)")
     parser.add_argument("--rate", type=float, default=2.0, help="Coordinate transmission rate in Hz")
-    parser.add_argument("--tilt", type=float, default=-45.0, help="Camera/gimbal tilt angle in degrees (default: -45.0, limits: -80° to +28°)")
+    parser.add_argument("--tilt", type=float, default=-20.0, help="Camera/gimbal tilt angle in degrees (default: -20.0, limits: -80° to +28°)")
     parser.add_argument("--mock", action="store_true", help="Force mock ADS-B traffic generator for offline testing")
     parser.add_argument("--headless", action="store_true", help="Run in non-interactive CLI mode without curses TUI")
     parser.add_argument("--select", type=str, default=None, help="In headless mode, attach to aircraft by callsign, hex, index (1..50), or 'closest'")

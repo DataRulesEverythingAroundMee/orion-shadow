@@ -41,7 +41,8 @@ class OrionServer:
                  max_tile_zoom: int = 17, tile_zoom: Optional[int] = None,
                  prefetch: bool = True, prefetch_distance: float = 3000.0,
                  lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
-                 pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0):
+                 pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0,
+                 speed: float = 0.0):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -54,6 +55,7 @@ class OrionServer:
         self.initial_pan = pan
         self.initial_tilt = tilt
         self.initial_heading = heading
+        self.initial_speed = speed
         self.terrain = TerrainEngine(dted_path)
         self.state = GimbalState(
             dt, 
@@ -63,7 +65,8 @@ class OrionServer:
             alt=alt,
             pan=pan,
             tilt=tilt,
-            heading=heading
+            heading=heading,
+            speed=speed
         )
         self.engine = ProtocolEngine()
         self.clients: Set[Tuple[str, int]] = set()  # UDP clients
@@ -106,12 +109,19 @@ class OrionServer:
         pkt_name = self.engine.packet_id_map.get(packet.packet_id, f"PKT_0x{packet.packet_id:02X}")
         details = []
         if packet.packet_id == OrionPktType.CMD:
-            if len(packet.data) >= 8:
+            if len(packet.data) == 8:
                 pan, tilt = struct.unpack(">ff", packet.data[:8])
                 details.append(f"pan={pan:.2f}, tilt={tilt:.2f}")
             elif len(packet.data) >= 4:
-                pan_raw, tilt_raw = struct.unpack(">hh", packet.data[:4])
-                details.append(f"pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
+                pan_raw, tilt_raw = struct.unpack_from(">hh", packet.data, 0)
+                if len(packet.data) >= 5:
+                    mode = packet.data[4]
+                    if mode in (0x10, 0x11, 0x30):
+                        details.append(f"mode=0x{mode:02X} (RATE), pan_rate={math.degrees(pan_raw/1000.0):.2f} deg/s, tilt_rate={math.degrees(tilt_raw/1000.0):.2f} deg/s")
+                    else:
+                        details.append(f"mode=0x{mode:02X}, pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
+                else:
+                    details.append(f"pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
         elif packet.packet_id == OrionPktType.CAMERAS:
             if len(packet.data) <= 4:
                 details.append("request camera settings")
@@ -163,10 +173,20 @@ class OrionServer:
                 power = struct.unpack(">f", packet.data[:4])[0]
                 details.append(f"laser_power={power:.2f}")
         elif packet.packet_id == OrionPktType.GPS_DATA:
-            if len(packet.data) >= 16:
+            if len(packet.data) >= 28:
                 raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)
+                vn, ve, vd = struct.unpack_from(">iii", packet.data, 16)
                 lat, lon, alt = raw_lat * 1e-7, raw_lon * 1e-7, raw_alt / 10000.0
-                details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m")
+                spd_kts = math.hypot(vn / 1000.0, ve / 1000.0) * 1.94384
+                details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m, speed={spd_kts:.1f}kts")
+            elif len(packet.data) >= 16:
+                f_lat, f_lon, f_alt, f_spd = struct.unpack_from(">ffff", packet.data, 0)
+                if -90.0 <= f_lat <= 90.0 and -180.0 <= f_lon <= 180.0 and (abs(f_lat) > 0.001 or abs(f_lon) > 0.001):
+                    details.append(f"lat={f_lat:.5f}, lon={f_lon:.5f}, alt={f_alt:.1f}m, speed={f_spd:.1f}kts")
+                else:
+                    raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)
+                    lat, lon, alt = raw_lat * 1e-7, raw_lon * 1e-7, raw_alt / 10000.0
+                    details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m")
             elif len(packet.data) >= 12:
                 lat, lon, alt = struct.unpack(">fff", packet.data[:12])
                 details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m")
@@ -463,8 +483,9 @@ if __name__ == "__main__":
     parser.add_argument("--lon", "--longitude", type=float, default=0.0, dest="lon", help="Initial camera/aircraft longitude in degrees (default: 0.0)")
     parser.add_argument("--alt", "--altitude", type=float, default=1000.0, dest="alt", help="Initial camera/aircraft altitude in meters MSL (default: 0.0)")
     parser.add_argument("--pan", type=float, default=0.0, help="Initial gimbal pan in degrees (default: 0.0)")
-    parser.add_argument("--tilt", type=float, default=None, help="Initial gimbal tilt in degrees (default: -45.0 if alt/lat/lon set, else 0.0)")
+    parser.add_argument("--tilt", type=float, default=None, help="Initial gimbal tilt in degrees (default: -20.0 if alt/lat/lon set, else 0.0)")
     parser.add_argument("--heading", type=float, default=0.0, help="Initial aircraft heading in degrees (default: 0.0)")
+    parser.add_argument("--speed", type=float, default=0.0, help="Initial aircraft speed in knots (default: 0.0)")
     parser.add_argument("--logger", "--log-level", default="warning", dest="log_level",
                         choices=["debug", "info", "warning", "error", "critical"],
                         type=str.lower,
@@ -495,7 +516,8 @@ if __name__ == "__main__":
         alt=args.alt,
         pan=args.pan,
         tilt=args.tilt,
-        heading=args.heading
+        heading=args.heading,
+        speed=args.speed
     )
     try:
         asyncio.run(server.run())

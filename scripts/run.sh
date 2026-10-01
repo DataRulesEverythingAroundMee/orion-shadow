@@ -30,6 +30,7 @@ ALT=""
 PAN=""
 TILT=""
 HEADING=""
+SPEED=""
 
 LOGGER="INFO"
 
@@ -55,6 +56,7 @@ while [[ "$#" -gt 0 ]]; do
         --pan) PAN="$2"; shift ;;
         --tilt) TILT="$2"; shift ;;
         --heading) HEADING="$2"; shift ;;
+        --speed) SPEED="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
@@ -117,6 +119,10 @@ fi
 
 if [ -n "$HEADING" ]; then
     CMD="$CMD --heading \"$HEADING\""
+fi
+
+if [ -n "$SPEED" ]; then
+    CMD="$CMD --speed \"$SPEED\""
 fi
 
 echo "Starting OrionShadow Simulator..."

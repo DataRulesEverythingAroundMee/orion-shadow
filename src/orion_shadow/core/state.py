@@ -9,17 +9,19 @@ from orion_shadow.engine.faults import FaultEngine
 class GimbalState:
     def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None, initialized: bool = True,
                  lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
-                 pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0):
+                 pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0,
+                 speed: float = 0.0):
         self.dt = dt
         self.initial_lat = float(lat)
         self.initial_lon = float(lon)
         self.initial_alt = float(alt)
         self.initial_pan = float(pan)
         self.initial_heading = float(heading)
+        self.initial_speed = float(speed)
 
-        # Default tilt to -45.0 if alt > 0 or non-zero lat/lon and tilt not specified, else 0.0
+        # Default tilt to -20.0 if alt > 0 or non-zero lat/lon and tilt not specified, else 0.0
         if tilt is None:
-            effective_tilt = -45.0 if (self.initial_alt > 0.0 or self.initial_lat != 0.0 or self.initial_lon != 0.0) else 0.0
+            effective_tilt = -20.0 if (self.initial_alt > 0.0 or self.initial_lat != 0.0 or self.initial_lon != 0.0) else 0.0
         else:
             effective_tilt = float(tilt)
         self.initial_tilt = effective_tilt
@@ -107,7 +109,10 @@ class GimbalState:
         self.aircraft_heading = self.initial_heading
         self.aircraft_roll = 0.0
         self.aircraft_pitch = 0.0
+        self.aircraft_speed = self.initial_speed  # Ground speed in knots
         self.gps_received = False
+        self._last_gps_time: Optional[float] = None
+        self._last_gps_pos: Optional[float, float] = None
 
         # Video & Tracking State
         self.video_resolution_width = 1280
@@ -140,7 +145,8 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.RESET:
             self.__init__(dt=self.dt, terrain_engine=self.terrain,
                           lat=self.initial_lat, lon=self.initial_lon, alt=self.initial_alt,
-                          pan=self.initial_pan, tilt=self.initial_tilt, heading=self.initial_heading)
+                          pan=self.initial_pan, tilt=self.initial_tilt, heading=self.initial_heading,
+                          speed=self.initial_speed)
             self.initialized = True
             
         elif packet.packet_id == OrionPktType.STARTUP_CMD:
@@ -152,10 +158,45 @@ class GimbalState:
                 self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
                 self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
             elif len(packet.data) >= 4:
-                pan_raw, tilt_raw = struct.unpack(">hh", packet.data[:4])
-                pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
-                self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
-                self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
+                pan_raw, tilt_raw = struct.unpack_from(">hh", packet.data, 0)
+                # Mode byte is at offset 4 for standard OrionCmd_t and OrionCmdExtended_t
+                if len(packet.data) >= 5:
+                    mode = packet.data[4]
+                else:
+                    # Legacy 4-byte payload without mode byte (treat as position mode)
+                    mode = 0x50
+
+                # Rate modes: ORION_MODE_RATE (0x10), ORION_MODE_GEO_RATE (0x11), ORION_MODE_SCENE (0x30)
+                if mode in (0x10, 0x11, 0x30):
+                    pan_rate = math.degrees(pan_raw / 1000.0)   # deg/s
+                    tilt_rate = math.degrees(tilt_raw / 1000.0) # deg/s
+
+                    impulse_time = 0.0
+                    if len(packet.data) >= 7:
+                        impulse_time = packet.data[6] / 10.0
+
+                    dt = impulse_time if impulse_time > 0.0 else self.dt
+
+                    if abs(pan_rate) > 1e-4:
+                        new_pan = self.target_pan + pan_rate * dt
+                        self.target_pan = (new_pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(new_pan, self.pan_max), self.pan_min)
+
+                    if abs(tilt_rate) > 1e-4:
+                        new_tilt = self.target_tilt + tilt_rate * dt
+                        self.target_tilt = max(min(new_tilt, self.tilt_max), self.tilt_min)
+
+                # Position modes: ORION_MODE_POSITION (0x50), ORION_MODE_POSITION_NO_LIMITS (0x51)
+                elif mode in (0x50, 0x51):
+                    pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
+                    self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
+                    self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
+
+                elif mode == 0x71:  # ORION_MODE_DOWN
+                    self.target_tilt = self.tilt_min
+
+                # If extended command (len >= 10), return OrionCmdExtendedResponse
+                if len(packet.data) >= 10:
+                    return self.get_cmd_extended_response_packet(packet.data)
         
         elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
             if len(packet.data) >= 1:
@@ -212,14 +253,48 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.GPS_DATA:
             if not self.is_faulty:
                 self.gps_received = True
-                if len(packet.data) >= 16:
-                    # Official Orion SDK GpsData packet (lat/lon in radians * 572957795.1308 = degrees * 1e7, alt * 10000)
+                new_lat, new_lon, new_alt = None, None, None
+                explicit_speed = False
+                if len(packet.data) >= 28:
                     raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)
-                    self.gps_lat = raw_lat * 1e-7
-                    self.gps_lon = raw_lon * 1e-7
-                    self.gps_alt = raw_alt / 10000.0
+                    vn, ve, vd = struct.unpack_from(">iii", packet.data, 16)
+                    new_lat = raw_lat * 1e-7
+                    new_lon = raw_lon * 1e-7
+                    new_alt = raw_alt / 10000.0
+                    spd_mps = math.hypot(vn / 1000.0, ve / 1000.0)
+                    self.aircraft_speed = spd_mps * 1.94384
+                    explicit_speed = True
+                elif len(packet.data) >= 16:
+                    f_lat, f_lon, f_alt, f_spd = struct.unpack_from(">ffff", packet.data, 0)
+                    if -90.0 <= f_lat <= 90.0 and -180.0 <= f_lon <= 180.0 and (abs(f_lat) > 0.001 or abs(f_lon) > 0.001):
+                        new_lat, new_lon, new_alt = f_lat, f_lon, f_alt
+                        self.aircraft_speed = max(0.0, f_spd)
+                        explicit_speed = True
+                    else:
+                        raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)
+                        new_lat = raw_lat * 1e-7
+                        new_lon = raw_lon * 1e-7
+                        new_alt = raw_alt / 10000.0
                 elif len(packet.data) >= 12:
-                    self.gps_lat, self.gps_lon, self.gps_alt = struct.unpack(">fff", packet.data[:12])
+                    new_lat, new_lon, new_alt = struct.unpack(">fff", packet.data[:12])
+
+                if new_lat is not None:
+                    # Estimate ground speed from GPS delta if speed wasn't explicitly provided
+                    import time
+                    now = time.time()
+                    if not explicit_speed and self._last_gps_pos is not None and self._last_gps_time is not None:
+                        dt = now - self._last_gps_time
+                        if dt > 0.05:
+                            dlat = (new_lat - self._last_gps_pos[0]) * 111320.0
+                            dlon = (new_lon - self._last_gps_pos[1]) * 111320.0 * math.cos(math.radians(new_lat))
+                            dist_m = math.hypot(dlat, dlon)
+                            if dist_m > 0.1:
+                                self.aircraft_speed = (dist_m / dt) * 1.94384
+                    self._last_gps_pos = (new_lat, new_lon)
+                    self._last_gps_time = now
+                    self.gps_lat = new_lat
+                    self.gps_lon = new_lon
+                    self.gps_alt = new_alt
 
         elif packet.packet_id == OrionPktType.EXT_HEADING_DATA:
             if len(packet.data) >= 8 and len(packet.data) < 12:
@@ -303,6 +378,14 @@ class GimbalState:
             self.terrain_alt = terrain_alt
             if self.gps_alt == 0.0:
                 self.gps_alt = terrain_alt
+        # Advance simulated aircraft position along heading if speed > 0 and no external GPS active
+        if not self.gps_received and self.aircraft_speed > 0.0:
+            speed_mps = self.aircraft_speed / 1.94384
+            dist_m = speed_mps * self.dt
+            hdg_rad = math.radians(self.aircraft_heading)
+            self.gps_lat += (dist_m * math.cos(hdg_rad)) / 111320.0
+            cos_lat = math.cos(math.radians(self.gps_lat))
+            self.gps_lon += (dist_m * math.sin(hdg_rad)) / (111320.0 * (cos_lat if abs(cos_lat) > 1e-6 else 1.0))
         self.uptime += self.dt
 
     def get_telemetry_packet(self) -> bytes:
@@ -319,6 +402,45 @@ class GimbalState:
             flags = 0
         data = struct.pack(">BBHBH", 1, 1, flags, 25, 0)
         return OrionPacket(OrionPktType.LASER_STATES, data).encode()
+
+    def get_cmd_extended_response_packet(self, cmd_data: bytes) -> bytes:
+        """Generates standard 28-byte OrionCmdExtendedResponse payload (Orion Public Protocol 1.4)."""
+        pan_raw, tilt_raw = struct.unpack_from(">hh", cmd_data, 0)
+        mode = cmd_data[4] if len(cmd_data) >= 5 else 0
+        stabilized = cmd_data[5] if len(cmd_data) >= 6 else 0
+        impulse_raw = cmd_data[6] if len(cmd_data) >= 7 else 0
+        seq_num = struct.unpack_from(">H", cmd_data, 7)[0] if len(cmd_data) >= 9 else 0
+        flags = cmd_data[9] if len(cmd_data) >= 10 else 0
+
+        clevis_time = int(self.uptime * 1000) & 0xFFFFFF
+        drops = 0
+        gyro_rates = (0, 0, 0)
+
+        pan_rad = math.radians(self.current_pan)
+        tilt_rad = math.radians(self.current_tilt)
+        scale_pos = 10430.06004058427
+        enc_pan = max(-32768, min(32767, int(round(pan_rad * scale_pos))))
+        enc_tilt = max(-32768, min(32767, int(round(tilt_rad * scale_pos))))
+
+        vel_pan_rad = math.radians(self.physics.pan.get("vel", 0.0) if hasattr(self, 'physics') and isinstance(self.physics.pan, dict) else 0.0)
+        vel_tilt_rad = math.radians(self.physics.tilt.get("vel", 0.0) if hasattr(self, 'physics') and isinstance(self.physics.tilt, dict) else 0.0)
+        scale_vel = 5215.030020292134
+        enc_rate_pan = max(-32768, min(32767, int(round(vel_pan_rad * scale_vel))))
+        enc_rate_tilt = max(-32768, min(32767, int(round(vel_tilt_rad * scale_vel))))
+
+        clevis_bytes = clevis_time.to_bytes(3, 'big')
+
+        payload = (
+            struct.pack(">hhBBBH", pan_raw, tilt_raw, mode, stabilized, impulse_raw, seq_num)
+            + clevis_bytes
+            + struct.pack(">BhhhhhhhB",
+                          drops,
+                          gyro_rates[0], gyro_rates[1], gyro_rates[2],
+                          enc_pan, enc_tilt,
+                          enc_rate_pan, enc_rate_tilt,
+                          flags)
+        )
+        return OrionPacket(OrionPktType.CMD, payload).encode()
 
     def get_camera_state_packet(self) -> bytes:
         data = struct.pack(

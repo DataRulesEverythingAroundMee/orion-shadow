@@ -122,7 +122,7 @@ python -m orion_shadow.server --host 0.0.0.0 --dted-path /path/to/dted/folder
 • `--lon` / `--longitude`: Initial camera/aircraft longitude in degrees (e.g. `-82.4567`, default: `0.0`).
 • `--alt` / `--altitude`: Initial camera/aircraft altitude in meters MSL (e.g. `1000`, default: `0.0`).
 • `--pan`: Initial gimbal pan angle in degrees (default: `0.0`).
-• `--tilt`: Initial gimbal tilt angle in degrees (default: `-45.0` if alt/lat/lon specified, else `0.0`).
+• `--tilt`: Initial gimbal tilt angle in degrees (default: `-20.0` if alt/lat/lon specified, else `0.0`).
 • `--heading`: Initial aircraft heading in degrees (default: `0.0`).
 
 ### 4. Integrating Your Software

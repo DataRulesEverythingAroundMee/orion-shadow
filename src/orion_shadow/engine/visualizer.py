@@ -127,48 +127,55 @@ class TileVisualizer:
 
         rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov)
 
-        # If all 4 rays point horizontally or into the sky (e.g. looking straight up), no ground is visible
+        limit_range = max(35000.0, float(max_ground_range or 35000.0))
+
+        # Check near-ground visibility from bottom rays
+        # If both bottom rays point into the sky or horizontal, no ground is visible
         if rays[2][2] <= 1e-5 and rays[3][2] <= 1e-5:
             return None
 
-        # Near ground depression angle from bottom rays
-        dep_bottom = max(0.5, math.degrees(math.asin(max(0.0, min(1.0, rays[2][2])))))
-        d_near = alt / math.tan(math.radians(dep_bottom))
-        limit_range = max(35000.0, float(max_ground_range or 35000.0))
+        # Nearest ground distance along bottom rays
+        min_dep = max(0.1, max(rays[2][2], rays[3][2]))
+        d_near = alt / min_dep
         if d_near > limit_range:
-            # Ground is beyond realistic visual range for satellite ortho-tiles (looking at horizon/sky)
+            # Nearest visible ground is beyond realistic visual range
             return None
-
-        # Far edge range bounded relative to boresight distance
-        boresight_dep = max(5.0, -cam_pitch)
-        boresight_dist = alt / math.tan(math.radians(boresight_dep))
-        d_far = min(limit_range, max(d_near * 1.5, boresight_dist * 2.5))
-        if d_far <= d_near:
-            d_far = d_near * 1.5
 
         cos_lat = math.cos(math.radians(lat))
         if abs(cos_lat) < 1e-10:
             cos_lat = 1e-10
 
-        # Iteratively constrain d_far so the tile bounding box fits within max_tiles
-        # This keeps near-ground tiles directly under the aircraft and prevents shifting
+        # Physical 3D ground plane ray intersections
+        # Camera is at height alt above the ground plane in NED frame.
+        # Ray direction (n, e, d): if d > 1e-4, ray intersects flat earth at t = alt / d.
+        # If d <= 1e-4 or ground distance exceeds limit_range, bound at limit_range along azimuth.
+        ground_pts = []
+        for n, e, d in rays:
+            horiz_mag = math.sqrt(n * n + e * e)
+            u_n = n / horiz_mag if horiz_mag > 1e-12 else 1.0
+            u_e = e / horiz_mag if horiz_mag > 1e-12 else 0.0
+
+            if d > 1e-4:
+                t = alt / d
+                gn = n * t
+                ge = e * t
+                if math.hypot(gn, ge) > limit_range:
+                    gn = u_n * limit_range
+                    ge = u_e * limit_range
+            else:
+                gn = u_n * limit_range
+                ge = u_e * limit_range
+            ground_pts.append([gn, ge])
+
+        # Iteratively constrain far edge so the tile bounding box fits within max_tiles
+        # Keeps near-ground tiles fixed under the camera while pulling far horizon closer if needed
         for attempt in range(5):
             corners_latlon = []
             corners_tile_frac = []
 
-            for idx, (n, e, d) in enumerate(rays):
-                horiz_mag = math.sqrt(n * n + e * e)
-                if horiz_mag < 1e-12:
-                    u_n, u_e = 1.0, 0.0
-                else:
-                    u_n, u_e = n / horiz_mag, e / horiz_mag
-
-                dist = d_far if idx in (0, 1) else d_near
-                ground_n = u_n * dist
-                ground_e = u_e * dist
-
-                c_lat = lat + ground_n / 111320.0
-                c_lon = lon + ground_e / (111320.0 * cos_lat)
+            for gn, ge in ground_pts:
+                c_lat = lat + gn / 111320.0
+                c_lon = lon + ge / (111320.0 * cos_lat)
                 corners_latlon.append((c_lat, c_lon))
 
                 c_lat_clamped = max(-85.05, min(85.05, c_lat))
@@ -186,8 +193,12 @@ class TileVisualizer:
             n_rows = max_ty - min_ty + 1
             if n_cols * n_rows <= max_tiles or attempt == 4:
                 break
-            # Pull far edge closer to fit inside max_tiles while keeping near ground fixed
-            d_far = d_near + (d_far - d_near) * 0.65
+
+            # Pull far edge (TL and TR: indices 0, 1) closer towards near edge (BL and BR: indices 2, 3)
+            ground_pts[0][0] = ground_pts[2][0] + (ground_pts[0][0] - ground_pts[2][0]) * 0.7
+            ground_pts[0][1] = ground_pts[2][1] + (ground_pts[0][1] - ground_pts[2][1]) * 0.7
+            ground_pts[1][0] = ground_pts[3][0] + (ground_pts[1][0] - ground_pts[3][0]) * 0.7
+            ground_pts[1][1] = ground_pts[3][1] + (ground_pts[1][1] - ground_pts[3][1]) * 0.7
 
         # Check for degenerate footprint (e.g. collinear points or zero area quad)
         # Order: 0=TL, 1=TR, 2=BL, 3=BR -> polygon vertices: 0, 1, 3, 2

@@ -212,6 +212,50 @@ class TestVideoTracking(unittest.TestCase):
             fp = vis.compute_footprint(lat, lon, alt, 0.0, 0.0, hfov, vfov, tile_z)
             self.assertIsNotNone(fp, f"Footprint returned None at pitch=0.0, zoom={zoom}x")
 
+    def test_footprint_zoom_magnification_perspective(self):
+        """Verify that zooming in narrows the physical ground footprint inversely with zoom
+        instead of over-extending towards the horizon (flattening distortion)."""
+        from orion_shadow.engine.video_server import VideoServer
+        import math
+
+        state = GimbalState()
+        server = VideoServer(state, tile_url_template="http://dummy/{z}/{x}/{y}.png")
+        vis = server.visualizer
+
+        lat, lon, alt = 37.0, -122.0, 3000.0
+        pitch = -20.0  # Camera pointing 20 deg down
+
+        prev_depth = None
+        for zoom in [1.0, 2.0, 5.0, 10.0, 20.0]:
+            hfov, vfov, _, _ = server._get_fov(zoom)
+            tile_z = server._compute_tile_zoom(lat, alt, pitch, hfov)
+            fp = vis.compute_footprint(lat, lon, alt, 0.0, pitch, hfov, vfov, tile_z)
+
+            self.assertIsNotNone(fp, f"Footprint should not be None at zoom {zoom}x")
+            corners_latlon = fp["corners_latlon"]
+            # Convert lat differences to ground meters along North
+            n_top = (corners_latlon[0][0] - lat) * 111320.0
+            n_bottom = (corners_latlon[2][0] - lat) * 111320.0
+            ground_depth = n_top - n_bottom
+
+            # Ground depth should decrease monotonically as zoom increases
+            if prev_depth is not None:
+                self.assertLess(ground_depth, prev_depth,
+                                f"Ground depth at {zoom}x ({ground_depth}m) should be less than at previous zoom ({prev_depth}m)")
+
+            # At zoom >= 5x, top edge should NOT be stretched to 20+ km horizon
+            if zoom >= 5.0:
+                self.assertLess(n_top, 11000.0,
+                                f"At zoom {zoom}x, top ground distance ({n_top}m) is excessively far (flattening distortion)")
+                self.assertGreater(n_bottom, 6000.0,
+                                   f"At zoom {zoom}x, bottom ground distance ({n_bottom}m) is unexpectedly close")
+
+            # At 20x zoom, the ground span should be tight (~600m)
+            if zoom == 20.0:
+                self.assertAlmostEqual(ground_depth, 601.0, delta=50.0)
+
+            prev_depth = ground_depth
+
 
 if __name__ == "__main__":
     unittest.main()

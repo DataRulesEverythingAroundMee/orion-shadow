@@ -264,6 +264,7 @@ class VideoServer:
         lat = float(getattr(self.state, 'gps_lat', 0.0))
         lon = float(getattr(self.state, 'gps_lon', 0.0))
         alt = float(getattr(self.state, 'gps_alt', 0.0))
+        speed = float(getattr(self.state, 'aircraft_speed', 0.0))
         zoom = float(max(1.0, getattr(self.state, 'camera_zoom', 1.0)))
 
         cam_pitch = ac_pitch + tilt
@@ -282,6 +283,7 @@ class VideoServer:
             'lat': lat,
             'lon': lon,
             'alt': alt,
+            'speed': speed,
             'zoom': zoom,
         }
 
@@ -499,6 +501,7 @@ class VideoServer:
         lat = telem['lat']
         lon = telem['lon']
         alt = telem['alt']
+        speed = telem.get('speed', 0.0)
         pan = telem['pan']
         tilt = telem['tilt']
         cam_hdg = telem['cam_hdg']
@@ -512,6 +515,16 @@ class VideoServer:
         cv2.line(frame, (cx, cy + 7), (cx, cy + 22), color, 1)
         cv2.circle(frame, (cx, cy), 3, color, 1)
 
+        # Left-margin Airspeed Indicator Box
+        spd_val = int(round(speed))
+        spd_text = f"{spd_val:3d} KTS"
+        bx1, bx2 = 18, 92
+        by1, by2 = cy - 11, cy + 11
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), (15, 25, 15), -1)
+        cv2.rectangle(frame, (bx1, by1), (bx2, by2), color, 1)
+        cv2.putText(frame, spd_text, (bx1 + 5, cy + 4), font, scale, color, thick)
+        cv2.line(frame, (bx2, cy), (bx2 + 8, cy), color, 1)
+
         # Top Header
         is_attached = getattr(self.state, 'gps_received', False)
         title = "ORION SHADOW - FLIGHT ATTACHED (ADS-B)" if is_attached else "ORION SHADOW - SIMULATOR"
@@ -523,7 +536,7 @@ class VideoServer:
         # Telemetry footer
         alt_ft = alt * 3.28084
         nav_str = f"LAT: {lat:+.5f}  LON: {lon:+.5f}  ALT: {alt:.1f}m ({alt_ft:.0f}ft)"
-        orient_str = f"A/C TRK: {ac_hdg:03.0f} deg   CAM HDG: {cam_hdg:03.0f} deg"
+        orient_str = f"A/C TRK: {ac_hdg:03.0f} deg   CAM HDG: {cam_hdg:03.0f} deg   SPD: {speed:03.0f} kts"
         gimbal_str = f"PAN: {pan:+.1f} deg   TILT: {tilt:+.1f} deg   ZOOM: {zoom:.1f}x"
         cv2.putText(frame, nav_str, (15, h - 45), font, scale, color, thick)
         cv2.putText(frame, orient_str, (15, h - 28), font, scale, color, thick)
@@ -596,10 +609,9 @@ class VideoServer:
                 n_cols = max_tx - min_tx + 1
                 n_rows = max_ty - min_ty + 1
 
-                # Dynamically size tile_px so the ground canvas stays under 1280px.
-                # This guarantees cv2.warpPerspective finishes in ~1-2ms at high FPS.
+                # Dynamically size tile_px so the ground canvas stays under 2048px while preserving high resolution.
                 max_dim = max(n_cols, n_rows)
-                target_canvas_dim = 1280
+                target_canvas_dim = 2048
                 tile_px = max(32, min(256, int(target_canvas_dim / max(1, max_dim))))
 
                 # Check if tile set changed since last frame
@@ -626,9 +638,12 @@ class VideoServer:
                                 # Cache resized tiles to avoid redundant resize
                                 rk = ((z, tx, ty), tile_px)
                                 if rk not in self._resized_cache:
-                                    self._resized_cache[rk] = cv2.resize(
-                                        img, (tile_px, tile_px),
-                                        interpolation=cv2.INTER_LINEAR)
+                                    if tile_px == 256 and img.shape[0] == 256 and img.shape[1] == 256:
+                                        self._resized_cache[rk] = img
+                                    else:
+                                        self._resized_cache[rk] = cv2.resize(
+                                            img, (tile_px, tile_px),
+                                            interpolation=cv2.INTER_LINEAR)
                                     # Evict old resized entries
                                     if len(self._resized_cache) > 2048:
                                         oldest = next(iter(self._resized_cache))
@@ -643,9 +658,10 @@ class VideoServer:
                     self._cached_tile_bounds = tile_bounds
 
                 horizon_y = int(self.height / 2.0 + telem['cam_pitch'] * ppd_v)
-                y_top = max(0, min(self.height - 2, horizon_y)) if horizon_y > 0 else 0
+                # sky_top is the pixel row where sky ends and ground begins (for sky compositing only)
+                sky_top = max(0, min(self.height - 2, horizon_y)) if horizon_y > 0 else 0
 
-                corners_changed = (corners_frac != self._cached_corners_frac or y_top != self._cached_y_top)
+                corners_changed = (corners_frac != self._cached_corners_frac or sky_top != self._cached_y_top)
 
                 # Recompute perspective matrix only when footprint corners change
                 if tiles_changed or corners_changed or self._cached_warped_frame is None:
@@ -654,16 +670,21 @@ class VideoServer:
                             [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
                             for c in corners_frac
                         ])
+                        # Ground map always warps to the full frame height (top = row 0).
+                        # compute_footprint already encodes the correct perspective geometry
+                        # for the current tilt angle; constraining dst to y_top would
+                        # artificially shrink the ground area and produce a false
+                        # altitude-gain effect when tilting the gimbal upward.
                         dst_pts = np.float32([
-                            [0,              y_top],
-                            [self.width - 1, y_top],
+                            [0,              0],
+                            [self.width - 1, 0],
                             [0,              self.height - 1],
                             [self.width - 1, self.height - 1],
                         ])
                         self._cached_warp_matrix = cv2.getPerspectiveTransform(
                             src_pts, dst_pts)
                         self._cached_corners_frac = corners_frac
-                        self._cached_y_top = y_top
+                        self._cached_y_top = sky_top
 
                         # Warp into pre-allocated buffer
                         if (self._frame_buf is None
@@ -671,24 +692,19 @@ class VideoServer:
                             self._frame_buf = np.empty(
                                 (self.height, self.width, 3), dtype=np.uint8)
 
-                        if y_top > 0:
-                            # Render realistic sky and distant horizon above ground
+                        cv2.warpPerspective(self._cached_ground,
+                                            self._cached_warp_matrix,
+                                            (self.width, self.height),
+                                            dst=self._frame_buf,
+                                            borderMode=cv2.BORDER_CONSTANT,
+                                            borderValue=(38, 72, 45))
+
+                        if sky_top > 0:
+                            # Composite synthetic sky above the horizon into the warped frame
                             base_frame = self._generate_synthetic_background()
-                            cv2.warpPerspective(self._cached_ground,
-                                                self._cached_warp_matrix,
-                                                (self.width, self.height),
-                                                dst=self._frame_buf,
-                                                borderMode=cv2.BORDER_CONSTANT,
-                                                borderValue=(38, 72, 45))
-                            base_frame[y_top:, :] = self._frame_buf[y_top:, :]
+                            base_frame[sky_top:, :] = self._frame_buf[sky_top:, :]
                             self._cached_warped_frame = base_frame
                         else:
-                            cv2.warpPerspective(self._cached_ground,
-                                                self._cached_warp_matrix,
-                                                (self.width, self.height),
-                                                dst=self._frame_buf,
-                                                borderMode=cv2.BORDER_CONSTANT,
-                                                borderValue=(38, 72, 45))
                             self._cached_warped_frame = self._frame_buf.copy()
                     except Exception:
                         self._cached_warped_frame = None
@@ -790,8 +806,17 @@ class VideoServer:
 
                     if self.proc and self.proc.stdin:
                         try:
-                            self.proc.stdin.write(raw_bytes)
-                            self.proc.stdin.flush()
+                            # Write to ffmpeg's stdin in a thread executor to avoid
+                            # blocking the asyncio event loop. A blocking write when
+                            # ffmpeg's pipe buffer is full would freeze all UDP/TCP
+                            # command handling, causing the server to lock up.
+                            loop = asyncio.get_event_loop()
+                            stdin = self.proc.stdin
+                            _raw = raw_bytes
+                            await loop.run_in_executor(
+                                None,
+                                lambda: (stdin.write(_raw), stdin.flush())
+                            )
                         except (BrokenPipeError, OSError):
                             print("[!] ffmpeg pipe disconnected, attempting restart...")
                             self.proc = self._start_ffmpeg()
