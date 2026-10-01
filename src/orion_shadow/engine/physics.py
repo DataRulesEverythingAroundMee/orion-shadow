@@ -30,8 +30,8 @@ class PhysicsEngine:
                 target = max(min(target, max_limit), min_limit)
             error = target - axis["pos"]
         
-        # Simple Proportional control for acceleration
-        desired_acc = error * 10.0 
+        # Critically damped PD control for smooth, overshoot-free response
+        desired_acc = error * 20.0 - axis["vel"] * 9.0
         
         # Clamp acceleration
         desired_acc = max(min(desired_acc, self.max_acc), -self.max_acc)
@@ -59,5 +59,9 @@ class PhysicsEngine:
                     axis["pos"] = max_limit
                     axis["vel"] = 0.0
         
-        # Apply damping
-        axis["vel"] *= self.damping
+        # Snap to target when settled to prevent lingering fractional error
+        if abs(error) < 0.25 and abs(axis["vel"]) < 1.0:
+            axis["pos"] = target
+            axis["vel"] = 0.0
+            axis["acc"] = 0.0
+

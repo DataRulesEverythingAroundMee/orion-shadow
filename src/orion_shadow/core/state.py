@@ -128,7 +128,7 @@ class GimbalState:
             self.initialized = True
             
         elif packet.packet_id == OrionPktType.CMD:
-            if len(packet.data) >= 8:
+            if len(packet.data) == 8:
                 pan, tilt = struct.unpack(">ff", packet.data[:8])
                 self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
                 self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
@@ -181,6 +181,11 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.LIMITS:
             if len(packet.data) == 8:
                 self.pan_limit, self.tilt_limit = struct.unpack(">ff", packet.data[:8])
+                self.pan_max = self.pan_limit
+                self.pan_min = -self.pan_limit
+                self.tilt_max = self.tilt_limit
+                self.tilt_min = -self.tilt_limit
+                self.pan_continuous = False
             return self.get_limits_packet()
 
         elif packet.packet_id == OrionPktType.GPS_DATA:

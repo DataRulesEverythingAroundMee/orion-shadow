@@ -466,7 +466,7 @@ class VideoServer:
             self.session = aiohttp.ClientSession(headers=headers)
 
         print(f"[+] Multicast Video Stream broadcasting on udp://@{self.multicast_group}:{self.port}")
-        print(f"[*] Connect via VLC/ffplay:  vlc udp://@{self.multicast_group}:{self.port}")
+        print(f"[*] Connect via ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 -framedrop -sync video udp://@{self.multicast_group}:{self.port}")
 
         self.proc = self._start_ffmpeg()
 

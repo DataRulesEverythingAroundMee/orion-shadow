@@ -409,7 +409,7 @@ class ADSBClient:
 class OrionBridge:
     """Maintains a UDP link to the Orion server and streams GPS, heading, and gimbal/camera packets."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = 20.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = -45.0):
         self.host = host
         self.port = port
         self.tilt_deg = tilt_deg
@@ -437,7 +437,7 @@ class OrionBridge:
 
                 # Send INITIALIZE packet so the server brings subsystems online
                 init_pkt = OrionPacket(OrionPktType.INITIALIZE, b"").encode()
-                # Send CMD packet to set camera tilt (default: 45 degrees)
+                # Send CMD packet to set camera tilt (default: -45 degrees)
                 cmd_payload = struct.pack(">ff", 0.0, float(self.tilt_deg))
                 cmd_pkt = OrionPacket(OrionPktType.CMD, cmd_payload).encode()
                 self.sock.sendto(init_pkt + cmd_pkt, (self.host, self.port))
@@ -1055,7 +1055,7 @@ def main():
     parser.add_argument("--orion-host", type=str, default="127.0.0.1", help="Orion server IP or hostname")
     parser.add_argument("--orion-port", type=int, default=8745, help="Orion server UDP port (default: 8745)")
     parser.add_argument("--rate", type=float, default=2.0, help="Coordinate transmission rate in Hz")
-    parser.add_argument("--tilt", type=float, default=20.0, help="Camera/gimbal tilt angle in degrees (default: 20.0, limits: -80° to +28°)")
+    parser.add_argument("--tilt", type=float, default=-45.0, help="Camera/gimbal tilt angle in degrees (default: -45.0, limits: -80° to +28°)")
     parser.add_argument("--mock", action="store_true", help="Force mock ADS-B traffic generator for offline testing")
     parser.add_argument("--headless", action="store_true", help="Run in non-interactive CLI mode without curses TUI")
     parser.add_argument("--select", type=str, default=None, help="In headless mode, attach to aircraft by callsign, hex, index (1..50), or 'closest'")

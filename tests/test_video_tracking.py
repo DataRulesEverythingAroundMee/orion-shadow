@@ -1,4 +1,8 @@
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
+
 import struct
 from orion_shadow.core.protocol import OrionPacket, OrionPktType
 from orion_shadow.core.state import GimbalState
@@ -108,3 +112,33 @@ def test_video_server_pure_python_fallback():
         assert len(frame) == 640 * 480 * 3
     finally:
         vs.np = orig_np
+
+
+def test_video_server_telemetry_tilt_consistency():
+    from orion_shadow.engine.video_server import VideoServer
+
+    state = GimbalState(dt=0.1)
+    server = VideoServer(state)
+
+    # Command -45.0 tilt (typical ADS-B attachment angle)
+    state.target_tilt = -45.0
+    telem = server._get_telemetry()
+    assert telem['tilt'] == -45.0
+    assert telem['target_tilt'] == -45.0
+
+    # Physics should settle onto target within 30 steps without overshoot
+    overshot = False
+    for _ in range(30):
+        state.step()
+        if state.physics.tilt["pos"] < -45.5:
+            overshot = True
+            break
+    assert not overshot, f"Tilt overshot -45.0: {state.physics.tilt['pos']}"
+    assert abs(state.physics.tilt["pos"] - (-45.0)) < 0.1, f"Failed to settle onto -45.0: {state.physics.tilt['pos']}"
+
+    # Telemetry should now show settled position
+    telem_settled = server._get_telemetry()
+    assert telem_settled['tilt'] == -45.0
+    assert telem_settled['current_tilt'] == -45.0
+    assert telem_settled['cam_pitch'] == -45.0
+
