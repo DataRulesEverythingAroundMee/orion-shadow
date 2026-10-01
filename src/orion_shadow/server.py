@@ -1,9 +1,10 @@
 import asyncio
 import argparse
+import logging
 import struct
 from typing import List, Optional, Set, Tuple
 from orion_shadow.core.engine import ProtocolEngine
-from orion_shadow.core.protocol import UDP_OUT_PORT, UDP_IN_PORT, TCP_PORT
+from orion_shadow.core.protocol import OrionPacket, OrionPktType, UDP_OUT_PORT, UDP_IN_PORT, TCP_PORT
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.video_server import VideoServer
@@ -33,7 +34,8 @@ class OrionServer:
                  udp_in_port: int = UDP_IN_PORT, tcp_port: Optional[int] = TCP_PORT,
                  dt: float = 0.1, dted_path: Optional[str] = None, 
                  tile_url: Optional[str] = None, video_port: int = 5004,
-                 multicast_group: str = '239.255.0.1', video_enabled: bool = True):
+                 multicast_group: str = '239.255.0.1', video_enabled: bool = True,
+                 log_level: str = 'warning'):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -50,6 +52,16 @@ class OrionServer:
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._tasks: List[asyncio.Task] = []
         self._running: bool = False
+
+        # Logger setup
+        self.logger = logging.getLogger("orion_shadow")
+        numeric_level = getattr(logging, log_level.upper(), logging.WARNING)
+        self.logger.setLevel(numeric_level)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+            self.logger.addHandler(handler)
+        self.logger.propagate = False
         
         # Multicast Video Server
         self.video_server: Optional[VideoServer] = None
@@ -61,6 +73,55 @@ class OrionServer:
                 port=video_port,
                 host=host
             )
+
+    def _format_packet_details(self, packet: OrionPacket) -> str:
+        pkt_name = self.engine.packet_id_map.get(packet.packet_id, f"PKT_0x{packet.packet_id:02X}")
+        details = []
+        if packet.packet_id == OrionPktType.CMD:
+            if len(packet.data) >= 8:
+                pan, tilt = struct.unpack(">ff", packet.data[:8])
+                details.append(f"pan={pan:.2f}, tilt={tilt:.2f}")
+            elif len(packet.data) >= 4:
+                pan_raw, tilt_raw = struct.unpack(">hh", packet.data[:4])
+                details.append(f"pan={pan_raw/1000.0:.2f}, tilt={tilt_raw/1000.0:.2f}")
+        elif packet.packet_id == OrionPktType.CAMERAS:
+            if len(packet.data) <= 4:
+                details.append("request camera settings")
+            else:
+                details.append(f"camera settings payload ({len(packet.data)} bytes)")
+        elif packet.packet_id == OrionPktType.KTNC_SETTINGS:
+            if len(packet.data) <= 1:
+                details.append("request KTnC settings")
+            else:
+                details.append(f"KTnC settings payload ({len(packet.data)} bytes)")
+        elif packet.packet_id == OrionPktType.INITIALIZE:
+            details.append("initialize / discovery request")
+        elif packet.packet_id == OrionPktType.RESET:
+            details.append("reset request")
+        elif packet.packet_id == OrionPktType.STARTUP_CMD:
+            details.append("startup command")
+        elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
+            if len(packet.data) >= 1:
+                details.append(f"switch to camera_index={packet.data[0]}")
+        elif packet.packet_id == OrionPktType.CAMERA_CMD:
+            if len(packet.data) >= 8:
+                zoom, focus = struct.unpack(">ff", packet.data[:8])
+                details.append(f"zoom={zoom:.2f}, focus={focus:.2f}")
+        elif packet.packet_id == OrionPktType.LASER_CMD:
+            if len(packet.data) >= 4:
+                power = struct.unpack(">f", packet.data[:4])[0]
+                details.append(f"laser_power={power:.2f}")
+        elif packet.packet_id == OrionPktType.GPS_DATA:
+            if len(packet.data) >= 12:
+                lat, lon, alt = struct.unpack(">fff", packet.data[:12])
+                details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m")
+        elif packet.packet_id == OrionPktType.EXT_HEADING_DATA:
+            if len(packet.data) >= 12:
+                heading, roll, pitch = struct.unpack(">fff", packet.data[:12])
+                details.append(f"heading={heading:.1f}, roll={roll:.1f}, pitch={pitch:.1f}")
+
+        detail_str = f" ({', '.join(details)})" if details else ""
+        return f"{pkt_name} [0x{packet.packet_id:02X}, len={len(packet.data)}]{detail_str}"
 
     def handle_datagram(self, data: bytes, addr: Tuple[str, int]):
         if addr not in self.clients:
@@ -78,6 +139,8 @@ class OrionServer:
                     full_packet = data[offset:offset + pkt_len]
                     try:
                         packet = self.engine.parse(full_packet)
+                        if self.logger.isEnabledFor(logging.INFO):
+                            self.logger.info(f"[UDP] Command/Request from {addr}: {self._format_packet_details(packet)}")
                         response_pkt = None
                         if packet:
                             response_pkt = self.state.update_from_command(packet)
@@ -121,6 +184,8 @@ class OrionServer:
                             del buffer[:pkt_len]
                             try:
                                 packet = self.engine.parse(full_packet)
+                                if self.logger.isEnabledFor(logging.INFO):
+                                    self.logger.info(f"[TCP] Command/Request from {addr}: {self._format_packet_details(packet)}")
                                 response_pkt = None
                                 if packet:
                                     response_pkt = self.state.update_from_command(packet)
@@ -307,6 +372,10 @@ if __name__ == "__main__":
     parser.add_argument("--multicast-group", type=str, default="239.255.0.1", help="Multicast IP address for video stream (default: 239.255.0.1)")
     parser.add_argument("--video-port", type=int, default=5004, help="Multicast UDP port for video stream (default: 5004)")
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
+    parser.add_argument("--logger", "--log-level", default="warning", dest="log_level",
+                        choices=["debug", "info", "warning", "error", "critical"],
+                        type=str.lower,
+                        help="Logging level for orion-shadow (e.g. info, debug, warning, error. Default: warning)")
     args = parser.parse_args()
 
     server = OrionServer(
@@ -319,7 +388,8 @@ if __name__ == "__main__":
         tile_url=args.tile_url,
         video_port=args.video_port,
         multicast_group=args.multicast_group,
-        video_enabled=not args.no_video
+        video_enabled=not args.no_video,
+        log_level=args.log_level
     )
     try:
         asyncio.run(server.run())
