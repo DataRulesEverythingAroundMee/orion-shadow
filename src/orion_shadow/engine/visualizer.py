@@ -1,6 +1,10 @@
 import math
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    np = None
 from typing import Tuple, List, Optional
+
 
 class TileVisualizer:
     """
@@ -34,10 +38,11 @@ class TileVisualizer:
         
         # In a real implementation, we would use the gimbal orientation (pan/tilt)
         # and the camera FOV to calculate the exact footprint on the tile grid.
-        # For this implementation, we return the center tile + 8 neighbors.
+        # For this implementation, we return the center tile + 8 neighbors in row-major order.
         tiles = []
-        for dx in [-1, 0, 1]:
-            for dy in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
                 tiles.append((zoom, zx + dx, zy + dy))
         
         return tiles
+
