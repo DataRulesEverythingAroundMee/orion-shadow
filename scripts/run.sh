@@ -24,6 +24,12 @@ TILE_ZOOM=""
 MAX_TILE_ZOOM=""
 PREFETCH_DISTANCE=""
 NO_PREFETCH=""
+LAT=""
+LON=""
+ALT=""
+PAN=""
+TILT=""
+HEADING=""
 
 LOGGER="INFO"
 
@@ -43,6 +49,12 @@ while [[ "$#" -gt 0 ]]; do
         --max-tile-zoom) MAX_TILE_ZOOM="$2"; shift ;;
         --prefetch-distance) PREFETCH_DISTANCE="$2"; shift ;;
         --no-prefetch) NO_PREFETCH="1" ;;
+        --lat|--latitude) LAT="$2"; shift ;;
+        --lon|--longitude) LON="$2"; shift ;;
+        --alt|--altitude) ALT="$2"; shift ;;
+        --pan) PAN="$2"; shift ;;
+        --tilt) TILT="$2"; shift ;;
+        --heading) HEADING="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift

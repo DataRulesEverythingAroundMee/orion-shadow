@@ -3,11 +3,11 @@ from typing import Dict
 
 class PhysicsEngine:
     """Simulates gimbal dynamics: inertia, velocity, and acceleration."""
-    def __init__(self, dt: float = 0.1):
+    def __init__(self, dt: float = 0.1, initial_pan: float = 0.0, initial_tilt: float = 0.0):
         self.dt = dt
         # Current state: [pos, vel, acc]
-        self.pan = {"pos": 0.0, "vel": 0.0, "acc": 0.0}
-        self.tilt = {"pos": 0.0, "vel": 0.0, "acc": 0.0}
+        self.pan = {"pos": float(initial_pan), "vel": 0.0, "acc": 0.0}
+        self.tilt = {"pos": float(initial_tilt), "vel": 0.0, "acc": 0.0}
         
         # Physical constants (approximating a heavy gimbal)
         self.max_vel = 60.0  # deg/s

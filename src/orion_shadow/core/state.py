@@ -7,13 +7,28 @@ from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.faults import FaultEngine
 
 class GimbalState:
-    def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None, initialized: bool = True):
+    def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None, initialized: bool = True,
+                 lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
+                 pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0):
         self.dt = dt
-        self.physics = PhysicsEngine(dt)
+        self.initial_lat = float(lat)
+        self.initial_lon = float(lon)
+        self.initial_alt = float(alt)
+        self.initial_pan = float(pan)
+        self.initial_heading = float(heading)
+
+        # Default tilt to -45.0 if alt > 0 or non-zero lat/lon and tilt not specified, else 0.0
+        if tilt is None:
+            effective_tilt = -45.0 if (self.initial_alt > 0.0 or self.initial_lat != 0.0 or self.initial_lon != 0.0) else 0.0
+        else:
+            effective_tilt = float(tilt)
+        self.initial_tilt = effective_tilt
+
+        self.physics = PhysicsEngine(dt, initial_pan=self.initial_pan, initial_tilt=self.initial_tilt)
         self.terrain = terrain_engine
         self.faults = FaultEngine()
-        self.target_pan = 0.0
-        self.target_tilt = 0.0
+        self.target_pan = self.initial_pan
+        self.target_tilt = self.initial_tilt
         self.initialized = initialized
         self.camera_id = 0
         self.laser_power = 0.0  # 0.0 to 1.0
@@ -85,13 +100,14 @@ class GimbalState:
         self.max_acceleration = 100.0        # 100.0 deg/s^2 max acceleration
 
         # Navigation State
-        self.gps_lat = 0.0
-        self.gps_lon = 0.0
-        self.gps_alt = 0.0
+        self.gps_lat = self.initial_lat
+        self.gps_lon = self.initial_lon
+        self.gps_alt = self.initial_alt
         self.terrain_alt = 0.0
-        self.aircraft_heading = 0.0
+        self.aircraft_heading = self.initial_heading
         self.aircraft_roll = 0.0
         self.aircraft_pitch = 0.0
+        self.gps_received = False
 
         # Video & Tracking State
         self.video_resolution_width = 1280
@@ -122,7 +138,9 @@ class GimbalState:
             self.initialized = True
             
         elif packet.packet_id == OrionPktType.RESET:
-            self.__init__(dt=self.dt, terrain_engine=self.terrain)
+            self.__init__(dt=self.dt, terrain_engine=self.terrain,
+                          lat=self.initial_lat, lon=self.initial_lon, alt=self.initial_alt,
+                          pan=self.initial_pan, tilt=self.initial_tilt, heading=self.initial_heading)
             self.initialized = True
             
         elif packet.packet_id == OrionPktType.STARTUP_CMD:
@@ -185,6 +203,7 @@ class GimbalState:
 
         elif packet.packet_id == OrionPktType.GPS_DATA:
             if not self.is_faulty:
+                self.gps_received = True
                 if len(packet.data) >= 16:
                     # Official Orion SDK GpsData packet (lat/lon in radians * 572957795.1308 = degrees * 1e7, alt * 10000)
                     raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)

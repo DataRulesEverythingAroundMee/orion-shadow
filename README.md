@@ -118,6 +118,12 @@ python -m orion_shadow.server --host 0.0.0.0 --dted-path /path/to/dted/folder
 • `--tcp-port`: TCP port for persistent communication (default: `8747`).
 • `--dt`: Physics/Telemetry update interval in seconds (default: `0.1`).
 • `--dted-path`: Path to DTED folder for terrain simulation (optional).
+• `--lat` / `--latitude`: Initial camera/aircraft latitude in degrees (e.g. `38.1234`, default: `0.0`).
+• `--lon` / `--longitude`: Initial camera/aircraft longitude in degrees (e.g. `-82.4567`, default: `0.0`).
+• `--alt` / `--altitude`: Initial camera/aircraft altitude in meters MSL (e.g. `1000`, default: `0.0`).
+• `--pan`: Initial gimbal pan angle in degrees (default: `0.0`).
+• `--tilt`: Initial gimbal tilt angle in degrees (default: `-45.0` if alt/lat/lon specified, else `0.0`).
+• `--heading`: Initial aircraft heading in degrees (default: `0.0`).
 
 ### 4. Integrating Your Software
 To use the simulator with your existing Orion SDK software, simply connect to the simulator's IP on the standard ports.

@@ -474,7 +474,7 @@ class VideoServer:
         cv2.circle(frame, (cx, cy), 3, color, 1)
 
         # Top Header
-        is_attached = (abs(lat) > 0.0001 or abs(lon) > 0.0001 or alt > 0.0)
+        is_attached = getattr(self.state, 'gps_received', False)
         title = "ORION SHADOW - FLIGHT ATTACHED (ADS-B)" if is_attached else "ORION SHADOW - SIMULATOR"
         cv2.putText(frame, title, (15, 20), font, scale, color, thick)
         status = "ACTIVE" if self.state.initialized else "STANDBY"

@@ -39,15 +39,32 @@ class OrionServer:
                  log_level: str = 'warning', video_fps: int = 24,
                  video_width: int = 1280, video_height: int = 720,
                  max_tile_zoom: int = 17, tile_zoom: Optional[int] = None,
-                 prefetch: bool = True, prefetch_distance: float = 3000.0):
+                 prefetch: bool = True, prefetch_distance: float = 3000.0,
+                 lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
+                 pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0):
         self.host = host
         self.port = port
         self.udp_port = port
         self.udp_in_port = udp_in_port
         self.tcp_port = tcp_port
         self.dt = dt
+        self.initial_lat = lat
+        self.initial_lon = lon
+        self.initial_alt = alt
+        self.initial_pan = pan
+        self.initial_tilt = tilt
+        self.initial_heading = heading
         self.terrain = TerrainEngine(dted_path)
-        self.state = GimbalState(dt, self.terrain)
+        self.state = GimbalState(
+            dt, 
+            self.terrain,
+            lat=lat,
+            lon=lon,
+            alt=alt,
+            pan=pan,
+            tilt=tilt,
+            heading=heading
+        )
         self.engine = ProtocolEngine()
         self.clients: Set[Tuple[str, int]] = set()  # UDP clients
         self.tcp_clients: Set[asyncio.StreamWriter] = set()  # TCP clients
@@ -438,6 +455,12 @@ if __name__ == "__main__":
     parser.add_argument("--no-prefetch", action="store_false", dest="prefetch", help="Disable lookahead tile prefetching ahead of aircraft")
     parser.add_argument("--prefetch-distance", type=float, default=3000.0, help="Lookahead distance in meters for prefetching tiles ahead of aircraft (default: 3000.0m)")
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
+    parser.add_argument("--lat", "--latitude", type=float, default=0.0, dest="lat", help="Initial camera/aircraft latitude in degrees (default: 0.0)")
+    parser.add_argument("--lon", "--longitude", type=float, default=0.0, dest="lon", help="Initial camera/aircraft longitude in degrees (default: 0.0)")
+    parser.add_argument("--alt", "--altitude", type=float, default=0.0, dest="alt", help="Initial camera/aircraft altitude in meters MSL (default: 0.0)")
+    parser.add_argument("--pan", type=float, default=0.0, help="Initial gimbal pan in degrees (default: 0.0)")
+    parser.add_argument("--tilt", type=float, default=None, help="Initial gimbal tilt in degrees (default: -45.0 if alt/lat/lon set, else 0.0)")
+    parser.add_argument("--heading", type=float, default=0.0, help="Initial aircraft heading in degrees (default: 0.0)")
     parser.add_argument("--logger", "--log-level", default="warning", dest="log_level",
                         choices=["debug", "info", "warning", "error", "critical"],
                         type=str.lower,
@@ -462,7 +485,13 @@ if __name__ == "__main__":
         max_tile_zoom=args.max_tile_zoom,
         tile_zoom=args.tile_zoom,
         prefetch=args.prefetch,
-        prefetch_distance=args.prefetch_distance
+        prefetch_distance=args.prefetch_distance,
+        lat=args.lat,
+        lon=args.lon,
+        alt=args.alt,
+        pan=args.pan,
+        tilt=args.tilt,
+        heading=args.heading
     )
     try:
         asyncio.run(server.run())
