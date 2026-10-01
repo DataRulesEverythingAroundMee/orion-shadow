@@ -370,6 +370,65 @@ class TestOrionServerSdkPorts(unittest.TestCase):
             server.close()
             thread.join(timeout=1.0)
 
+    def test_sdk_gps_and_ext_heading(self):
+        udp_port = get_free_port()
+        tcp_port = get_free_port()
+        server = OrionServer(host="127.0.0.1", port=udp_port, tcp_port=tcp_port, dt=0.05, video_enabled=False)
+        thread = threading.Thread(target=lambda: asyncio.run(server.run()), daemon=True)
+        thread.start()
+        time.sleep(0.1)
+
+        try:
+            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            from orion_sdk.connection import OrionConnection
+            from orion_sdk.packets import GpsData, OrionExtHeadingData
+            import math
+
+            conn = OrionConnection.open_tcp("127.0.0.1", tcp_port)
+
+            # Send official SDK GpsData packet
+            gps = GpsData()
+            gps.Latitude = math.radians(45.7)
+            gps.Longitude = math.radians(-121.5)
+            gps.Altitude = 300.0
+            conn.send(gps)
+
+            # Check echo received
+            received_gps = False
+            for _ in range(20):
+                pkt = conn.receive(timeout=0.1)
+                if isinstance(pkt, GpsData):
+                    received_gps = True
+                    break
+            self.assertTrue(received_gps)
+            time.sleep(0.1)
+            self.assertAlmostEqual(server.state.gps_lat, 45.7, places=4)
+            self.assertAlmostEqual(server.state.gps_lon, -121.5, places=4)
+            self.assertAlmostEqual(server.state.gps_alt, 300.0, places=1)
+
+            # Send official SDK OrionExtHeadingData packet (with normalized heading -90 deg)
+            hdg = OrionExtHeadingData()
+            hdg.extHeading = math.radians(-90.0)
+            hdg.pitch = math.radians(5.0)
+            conn.send(hdg)
+
+            # Check echo received
+            received_hdg = False
+            for _ in range(20):
+                pkt = conn.receive(timeout=0.1)
+                if isinstance(pkt, OrionExtHeadingData):
+                    received_hdg = True
+                    break
+            self.assertTrue(received_hdg)
+            time.sleep(0.1)
+            self.assertAlmostEqual(server.state.aircraft_heading, 270.0, places=1)
+            self.assertAlmostEqual(server.state.aircraft_pitch, 5.0, places=1)
+
+            conn.close()
+        finally:
+            server.close()
+            thread.join(timeout=1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

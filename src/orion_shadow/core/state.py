@@ -172,11 +172,24 @@ class GimbalState:
             return self.get_limits_packet()
 
         elif packet.packet_id == OrionPktType.GPS_DATA:
-            if not self.is_faulty and len(packet.data) >= 12:
-                self.gps_lat, self.gps_lon, self.gps_alt = struct.unpack(">fff", packet.data[:12])
+            if not self.is_faulty:
+                if len(packet.data) >= 16:
+                    # Official Orion SDK GpsData packet (lat/lon in radians * 572957795.1308 = degrees * 1e7, alt * 10000)
+                    raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)
+                    self.gps_lat = raw_lat * 1e-7
+                    self.gps_lon = raw_lon * 1e-7
+                    self.gps_alt = raw_alt / 10000.0
+                elif len(packet.data) >= 12:
+                    self.gps_lat, self.gps_lon, self.gps_alt = struct.unpack(">fff", packet.data[:12])
 
         elif packet.packet_id == OrionPktType.EXT_HEADING_DATA:
-            if len(packet.data) >= 12:
+            if len(packet.data) >= 8 and len(packet.data) < 12:
+                # Official Orion SDK OrionExtHeadingData packet (8 bytes: extHeading >h, noise >H, flags >H, pitch >h)
+                raw_hdg = struct.unpack_from(">h", packet.data, 0)[0]
+                raw_pitch = struct.unpack_from(">h", packet.data, 6)[0]
+                self.aircraft_heading = math.degrees(raw_hdg / 10430.06004058) % 360.0
+                self.aircraft_pitch = math.degrees(raw_pitch / 10430.06004058)
+            elif len(packet.data) >= 12:
                 self.aircraft_heading, self.aircraft_roll, self.aircraft_pitch = struct.unpack(">fff", packet.data[:12])
 
         elif packet.packet_id == OrionPktType.VIDEO_OPTIONS:

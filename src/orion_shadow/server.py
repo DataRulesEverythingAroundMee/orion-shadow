@@ -2,6 +2,7 @@ import asyncio
 import argparse
 import logging
 import struct
+import math
 from typing import List, Optional, Set, Tuple
 from orion_shadow.core.engine import ProtocolEngine
 from orion_shadow.core.protocol import OrionPacket, OrionPktType, UDP_OUT_PORT, UDP_IN_PORT, TCP_PORT
@@ -119,11 +120,21 @@ class OrionServer:
                 power = struct.unpack(">f", packet.data[:4])[0]
                 details.append(f"laser_power={power:.2f}")
         elif packet.packet_id == OrionPktType.GPS_DATA:
-            if len(packet.data) >= 12:
+            if len(packet.data) >= 16:
+                raw_lat, raw_lon, raw_alt = struct.unpack_from(">iii", packet.data, 4)
+                lat, lon, alt = raw_lat * 1e-7, raw_lon * 1e-7, raw_alt / 10000.0
+                details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m")
+            elif len(packet.data) >= 12:
                 lat, lon, alt = struct.unpack(">fff", packet.data[:12])
                 details.append(f"lat={lat:.5f}, lon={lon:.5f}, alt={alt:.1f}m")
         elif packet.packet_id == OrionPktType.EXT_HEADING_DATA:
-            if len(packet.data) >= 12:
+            if len(packet.data) >= 8 and len(packet.data) < 12:
+                raw_hdg = struct.unpack_from(">h", packet.data, 0)[0]
+                raw_pitch = struct.unpack_from(">h", packet.data, 6)[0]
+                heading = math.degrees(raw_hdg / 10430.06004058) % 360.0
+                pitch = math.degrees(raw_pitch / 10430.06004058)
+                details.append(f"heading={heading:.1f}, pitch={pitch:.1f}")
+            elif len(packet.data) >= 12:
                 heading, roll, pitch = struct.unpack(">fff", packet.data[:12])
                 details.append(f"heading={heading:.1f}, roll={roll:.1f}, pitch={pitch:.1f}")
         elif packet.packet_id == OrionPktType.GEOLOCATE_TELEMETRY_CORE:
