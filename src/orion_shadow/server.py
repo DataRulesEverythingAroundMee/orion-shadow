@@ -134,9 +134,13 @@ class OrionServer:
         elif packet.packet_id == OrionPktType.CAMERA_CMD or packet.packet_id == OrionPktType.CAMERA_STATE:
             if len(packet.data) == 0:
                 details.append("request camera state")
-            elif len(packet.data) >= 5 and len(packet.data) < 8:
-                zoom_raw, focus_raw = struct.unpack_from(">hh", packet.data, 0)
-                details.append(f"zoom={zoom_raw / 100.0:.2f}x, focus={focus_raw / 10000.0:.2f}")
+            elif len(packet.data) >= 2 and len(packet.data) < 8:
+                zoom_raw = struct.unpack_from(">h", packet.data, 0)[0]
+                if len(packet.data) >= 4:
+                    focus_raw = struct.unpack_from(">h", packet.data, 2)[0]
+                    details.append(f"zoom={zoom_raw / 100.0:.2f}x, focus={focus_raw / 10000.0:.2f}")
+                else:
+                    details.append(f"zoom={zoom_raw / 100.0:.2f}x")
             elif len(packet.data) >= 8:
                 zoom, focus = struct.unpack(">ff", packet.data[:8])
                 details.append(f"zoom={zoom:.2f}x, focus={focus:.2f}")
@@ -457,7 +461,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
     parser.add_argument("--lat", "--latitude", type=float, default=0.0, dest="lat", help="Initial camera/aircraft latitude in degrees (default: 0.0)")
     parser.add_argument("--lon", "--longitude", type=float, default=0.0, dest="lon", help="Initial camera/aircraft longitude in degrees (default: 0.0)")
-    parser.add_argument("--alt", "--altitude", type=float, default=0.0, dest="alt", help="Initial camera/aircraft altitude in meters MSL (default: 0.0)")
+    parser.add_argument("--alt", "--altitude", type=float, default=1000.0, dest="alt", help="Initial camera/aircraft altitude in meters MSL (default: 0.0)")
     parser.add_argument("--pan", type=float, default=0.0, help="Initial gimbal pan in degrees (default: 0.0)")
     parser.add_argument("--tilt", type=float, default=None, help="Initial gimbal tilt in degrees (default: -45.0 if alt/lat/lon set, else 0.0)")
     parser.add_argument("--heading", type=float, default=0.0, help="Initial aircraft heading in degrees (default: 0.0)")

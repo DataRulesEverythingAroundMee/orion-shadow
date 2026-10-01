@@ -91,6 +91,7 @@ class VideoServer:
         self._cached_tile_bounds: Optional[Tuple[int, int, int, int]] = None
         self._cached_warp_matrix: Optional[Any] = None
         self._cached_corners_frac: Optional[List[Tuple[float, float]]] = None
+        self._cached_y_top: int = -9999
         self._cached_warped_frame: Optional[Any] = None
 
         # Resized-tile cache: avoids cv2.resize on every tile every frame
@@ -146,6 +147,41 @@ class VideoServer:
             return self.tile_cache[cache_key]
         await self._fetch_tile_worker(z, x, y)
         return self.tile_cache.get(cache_key)
+
+    def _get_tile_or_parent(self, z: int, x: int, y: int) -> Optional[Any]:
+        """
+        Retrieves tile (z, x, y) from cache. If not present, checks lower zoom level parent
+        tiles in the cache and extracts the scaled sub-region so imagery is never pitch black.
+        """
+        if (z, x, y) in self.tile_cache:
+            return self.tile_cache[(z, x, y)]
+
+        if cv2 is None or np is None:
+            return None
+
+        # Check up to 5 zoom levels up for an available parent tile
+        min_z = max(1, z - 5)
+        for pz in range(z - 1, min_z - 1, -1):
+            dz = z - pz
+            px = x >> dz
+            py = y >> dz
+            if (pz, px, py) in self.tile_cache:
+                parent_img = self.tile_cache[(pz, px, py)]
+                if parent_img is None or not isinstance(parent_img, np.ndarray):
+                    continue
+                ph, pw = parent_img.shape[:2]
+                sub_w = pw / float(1 << dz)
+                sub_h = ph / float(1 << dz)
+                sub_x = (x & ((1 << dz) - 1)) * sub_w
+                sub_y = (y & ((1 << dz) - 1)) * sub_h
+                x0 = int(round(sub_x))
+                y0 = int(round(sub_y))
+                x1 = max(x0 + 1, int(round(sub_x + sub_w)))
+                y1 = max(y0 + 1, int(round(sub_y + sub_h)))
+                cropped = parent_img[y0:y1, x0:x1]
+                if cropped.size > 0:
+                    return cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_LINEAR)
+        return None
 
     async def _prefetch_loop(self):
         """
@@ -367,7 +403,8 @@ class VideoServer:
             y_m = lat * 111320.0
             hdg_rad = math.radians(cam_hdg)
 
-            grid_spacing = 500.0  # 500-meter ground grid
+            grid_scale = max(1.0, zoom)
+            grid_spacing = 500.0 / (2 ** min(6, int(math.log2(grid_scale))))
             d_forward = x_m * math.sin(hdg_rad) + y_m * math.cos(hdg_rad)
             d_lateral = x_m * math.cos(hdg_rad) - y_m * math.sin(hdg_rad)
 
@@ -375,9 +412,11 @@ class VideoServer:
             lat_offset = d_lateral % grid_spacing
 
             # Draw transverse ground lines (distance ahead)
-            for k in range(1, 24):
-                dist_ahead = k * grid_spacing - fwd_offset
-                if dist_ahead < 25.0:
+            dep_boresight = max(1.0, -cam_pitch)
+            nom_dist = alt / math.tan(math.radians(dep_boresight))
+            for k in range(-15, 25):
+                dist_ahead = nom_dist + k * grid_spacing - fwd_offset
+                if dist_ahead < 10.0:
                     continue
                 dep_angle = math.degrees(math.atan2(alt, dist_ahead))
                 rel_pitch = cam_pitch + dep_angle
@@ -388,11 +427,11 @@ class VideoServer:
                     cv2.line(frame, (0, sy), (self.width, sy), (color_val // 2, color_val, color_val // 2), 1)
 
             # Draw longitudinal ground lines (converging to vanishing point on horizon)
-            vanish_y = int(np.clip(horizon_cy, -100, self.height + 100))
-            for m in range(-12, 13):
+            vanish_y = int(np.clip(horizon_cy, -25000, self.height + 25000))
+            for m in range(-20, 21):
                 ground_x = m * grid_spacing - lat_offset
-                near_dist = alt / max(0.01, math.tan(math.radians(max(1.0, -cam_pitch + vfov / 2))))
-                sx_bottom = int(cx + (ground_x / max(50.0, near_dist)) * (self.width * 0.8))
+                rel_az_deg = math.degrees(math.atan2(ground_x, max(10.0, nom_dist)))
+                sx_bottom = int(cx + rel_az_deg * ppd_h)
                 if -self.width < sx_bottom < self.width * 2:
                     cv2.line(frame, (cx, vanish_y), (sx_bottom, self.height), (35, 65, 30), 1)
 
@@ -507,7 +546,7 @@ class VideoServer:
         # If visualizer is enabled, attempt perspective-correct tile rendering
         if self.visualizer is not None and np is not None and cv2 is not None:
             telem = self._get_telemetry()
-            hfov, vfov, _, _ = self._get_fov(telem['zoom'])
+            hfov, vfov, ppd_h, ppd_v = self._get_fov(telem['zoom'])
             alt = telem['alt']
 
             # Adaptive zoom: pick tile zoom level matching the camera's GSD
@@ -534,14 +573,14 @@ class VideoServer:
                     telem['pan'], telem['tilt'], zoom
                 )
 
-            # Retrieve cached tiles immediately without blocking the rendering loop
+            # Retrieve cached tiles (with parent fallback) immediately without blocking rendering
             tile_results = {}
             missing_tiles = []
             for t in tiles_to_fetch:
-                img = self.tile_cache.get(t)
+                img = self._get_tile_or_parent(*t)
                 if img is not None:
                     tile_results[t] = img
-                elif t not in self._pending_tile_fetches:
+                if t not in self.tile_cache and t not in self._pending_tile_fetches:
                     missing_tiles.append(t)
 
             # Trigger background asynchronous fetch for missing tiles
@@ -573,12 +612,12 @@ class VideoServer:
                 tiles_changed = (current_tile_keys != self._cached_tile_keys
                                  or tile_bounds != self._cached_tile_bounds
                                  or tile_px != self._cached_tile_px)
-                corners_changed = (corners_frac != self._cached_corners_frac)
 
                 # Rebuild ground image only when tile set changes
-                if tiles_changed:
+                if tiles_changed or self._cached_ground is None:
                     ground = np.zeros((n_rows * tile_px, n_cols * tile_px, 3),
                                       dtype=np.uint8)
+                    ground[:, :] = (38, 72, 45)  # Natural earth-green base to avoid black voids
                     for (z, tx, ty), img in tile_results.items():
                         if img is not None:
                             col = tx - min_tx
@@ -603,69 +642,62 @@ class VideoServer:
                     self._cached_tile_px = tile_px
                     self._cached_tile_bounds = tile_bounds
 
-                # Recompute perspective matrix only when footprint corners change
-                if tiles_changed or corners_changed:
-                    src_pts = np.float32([
-                        [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
-                        for c in corners_frac
-                    ])
-                    dst_pts = np.float32([
-                        [0,              0],
-                        [self.width - 1, 0],
-                        [0,              self.height - 1],
-                        [self.width - 1, self.height - 1],
-                    ])
-                    self._cached_warp_matrix = cv2.getPerspectiveTransform(
-                        src_pts, dst_pts)
-                    self._cached_corners_frac = corners_frac
+                horizon_y = int(self.height / 2.0 + telem['cam_pitch'] * ppd_v)
+                y_top = max(0, min(self.height - 2, horizon_y)) if horizon_y > 0 else 0
 
-                    # Warp into pre-allocated buffer
-                    if (self._frame_buf is None
-                            or self._frame_buf.shape != (self.height, self.width, 3)):
-                        self._frame_buf = np.empty(
-                            (self.height, self.width, 3), dtype=np.uint8)
-                    cv2.warpPerspective(self._cached_ground,
-                                        self._cached_warp_matrix,
-                                        (self.width, self.height),
-                                        dst=self._frame_buf,
-                                        borderMode=cv2.BORDER_CONSTANT,
-                                        borderValue=(0, 0, 0))
-                    self._cached_warped_frame = self._frame_buf.copy()
+                corners_changed = (corners_frac != self._cached_corners_frac or y_top != self._cached_y_top)
+
+                # Recompute perspective matrix only when footprint corners change
+                if tiles_changed or corners_changed or self._cached_warped_frame is None:
+                    try:
+                        src_pts = np.float32([
+                            [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
+                            for c in corners_frac
+                        ])
+                        dst_pts = np.float32([
+                            [0,              y_top],
+                            [self.width - 1, y_top],
+                            [0,              self.height - 1],
+                            [self.width - 1, self.height - 1],
+                        ])
+                        self._cached_warp_matrix = cv2.getPerspectiveTransform(
+                            src_pts, dst_pts)
+                        self._cached_corners_frac = corners_frac
+                        self._cached_y_top = y_top
+
+                        # Warp into pre-allocated buffer
+                        if (self._frame_buf is None
+                                or self._frame_buf.shape != (self.height, self.width, 3)):
+                            self._frame_buf = np.empty(
+                                (self.height, self.width, 3), dtype=np.uint8)
+
+                        if y_top > 0:
+                            # Render realistic sky and distant horizon above ground
+                            base_frame = self._generate_synthetic_background()
+                            cv2.warpPerspective(self._cached_ground,
+                                                self._cached_warp_matrix,
+                                                (self.width, self.height),
+                                                dst=self._frame_buf,
+                                                borderMode=cv2.BORDER_CONSTANT,
+                                                borderValue=(38, 72, 45))
+                            base_frame[y_top:, :] = self._frame_buf[y_top:, :]
+                            self._cached_warped_frame = base_frame
+                        else:
+                            cv2.warpPerspective(self._cached_ground,
+                                                self._cached_warp_matrix,
+                                                (self.width, self.height),
+                                                dst=self._frame_buf,
+                                                borderMode=cv2.BORDER_CONSTANT,
+                                                borderValue=(38, 72, 45))
+                            self._cached_warped_frame = self._frame_buf.copy()
+                    except Exception:
+                        self._cached_warped_frame = None
 
                 # Apply HUD on a copy of the cached warp (HUD updates every frame)
-                frame = self._cached_warped_frame.copy()
-                self.current_frame = self._draw_hud(frame)
-                return
-
-            elif has_valid_tiles:
-                # Flat fallback when no footprint (altitude too low / unavailable)
-                tile_size = 160
-                composite = np.zeros((3 * tile_size, 3 * tile_size, 3),
-                                     dtype=np.uint8)
-                tile_list = list(tile_results.values())
-                idx = 0
-                for dy in range(3):
-                    for dx in range(3):
-                        if idx < len(tile_list) and tile_list[idx] is not None:
-                            resized = cv2.resize(tile_list[idx],
-                                                 (tile_size, tile_size))
-                            composite[dy * tile_size:(dy + 1) * tile_size,
-                                      dx * tile_size:(dx + 1) * tile_size] = resized
-                        idx += 1
-
-                rot_mat = cv2.getRotationMatrix2D(
-                    (composite.shape[1] // 2, composite.shape[0] // 2),
-                    -telem['cam_hdg'], 1.0)
-                rotated = cv2.warpAffine(composite, rot_mat,
-                                         (composite.shape[1], composite.shape[0]))
-
-                frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                sx = (self.width - 3 * tile_size) // 2
-                sy = (self.height - 3 * tile_size) // 2
-                frame[sy:sy + 3 * tile_size,
-                      sx:sx + 3 * tile_size] = rotated
-                self.current_frame = self._draw_hud(frame)
-                return
+                if self._cached_warped_frame is not None:
+                    frame = self._cached_warped_frame.copy()
+                    self.current_frame = self._draw_hud(frame)
+                    return
 
         # Default synthetic background + HUD
         base_frame = self._generate_synthetic_background()
@@ -742,7 +774,11 @@ class VideoServer:
 
         try:
             while True:
-                await self._update_frame()
+                try:
+                    await self._update_frame()
+                except Exception as e:
+                    # Log rendering error but keep stream loop alive
+                    print(f"[!] Video rendering error: {e}")
 
                 if self.current_frame is not None:
                     if hasattr(self.current_frame, 'tobytes'):

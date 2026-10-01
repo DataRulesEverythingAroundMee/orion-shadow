@@ -163,13 +163,21 @@ class GimbalState:
                 self.camera_ready = False
             
         elif packet.packet_id in (OrionPktType.CAMERA_CMD, OrionPktType.CAMERA_STATE):
-            if len(packet.data) >= 5 and len(packet.data) < 8:
-                zoom_raw, focus_raw = struct.unpack_from(">hh", packet.data, 0)
+            if len(packet.data) >= 2 and len(packet.data) < 8:
+                zoom_raw = struct.unpack_from(">h", packet.data, 0)[0]
                 zoom = zoom_raw / 100.0
                 if zoom >= 1.0:
                     self.camera_zoom = min(zoom, self.max_total_zoom)
-                if focus_raw != -1:
-                    self.camera_focus = focus_raw / 10000.0
+                if len(packet.data) >= 4:
+                    focus_raw = struct.unpack_from(">h", packet.data, 2)[0]
+                    if focus_raw != -1:
+                        self.camera_focus = focus_raw / 10000.0
+                if len(packet.data) >= 5:
+                    b = packet.data[4]
+                    keep_active = (b >> 7) & 1
+                    cam_idx = b & 0x7F
+                    if not keep_active:
+                        self.camera_id = min(cam_idx, len(self.cameras) - 1) if self.cameras else cam_idx
                 self.camera_ready = True
             elif len(packet.data) >= 8:
                 zoom, focus = struct.unpack(">ff", packet.data[:8])

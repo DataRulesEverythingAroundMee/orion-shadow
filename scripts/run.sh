@@ -95,6 +95,30 @@ if [ -n "$NO_PREFETCH" ]; then
     CMD="$CMD --no-prefetch"
 fi
 
+if [ -n "$LAT" ]; then
+    CMD="$CMD --lat \"$LAT\""
+fi
+
+if [ -n "$LON" ]; then
+    CMD="$CMD --lon \"$LON\""
+fi
+
+if [ -n "$ALT" ]; then
+    CMD="$CMD --alt \"$ALT\""
+fi
+
+if [ -n "$PAN" ]; then
+    CMD="$CMD --pan \"$PAN\""
+fi
+
+if [ -n "$TILT" ]; then
+    CMD="$CMD --tilt \"$TILT\""
+fi
+
+if [ -n "$HEADING" ]; then
+    CMD="$CMD --heading \"$HEADING\""
+fi
+
 echo "Starting OrionShadow Simulator..."
 echo "Command: $CMD"
 echo "--------------------------------"

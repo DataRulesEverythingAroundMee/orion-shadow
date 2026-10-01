@@ -127,63 +127,75 @@ class TileVisualizer:
 
         rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov)
 
+        # If all 4 rays point horizontally or into the sky (e.g. looking straight up), no ground is visible
+        if rays[2][2] <= 1e-5 and rays[3][2] <= 1e-5:
+            return None
+
+        # Near ground depression angle from bottom rays
+        dep_bottom = max(0.5, math.degrees(math.asin(max(0.0, min(1.0, rays[2][2])))))
+        d_near = alt / math.tan(math.radians(dep_bottom))
+        limit_range = max(35000.0, float(max_ground_range or 35000.0))
+        if d_near > limit_range:
+            # Ground is beyond realistic visual range for satellite ortho-tiles (looking at horizon/sky)
+            return None
+
+        # Far edge range bounded relative to boresight distance
+        boresight_dep = max(5.0, -cam_pitch)
+        boresight_dist = alt / math.tan(math.radians(boresight_dep))
+        d_far = min(limit_range, max(d_near * 1.5, boresight_dist * 2.5))
+        if d_far <= d_near:
+            d_far = d_near * 1.5
+
         cos_lat = math.cos(math.radians(lat))
         if abs(cos_lat) < 1e-10:
             cos_lat = 1e-10
 
-        corners_latlon = []
-        corners_tile_frac = []
+        # Iteratively constrain d_far so the tile bounding box fits within max_tiles
+        # This keeps near-ground tiles directly under the aircraft and prevents shifting
+        for attempt in range(5):
+            corners_latlon = []
+            corners_tile_frac = []
 
-        for n, e, d in rays:
-            if d > 1e-6:
-                # Ray points downward — intersect with ground plane (Down = alt)
-                t = alt / d
-                ground_n = t * n
-                ground_e = t * e
-                # Cap extreme ranges from shallow-angle rays
-                ground_dist = math.sqrt(ground_n * ground_n + ground_e * ground_e)
-                if ground_dist > max_ground_range:
-                    scale = max_ground_range / ground_dist
-                    ground_n *= scale
-                    ground_e *= scale
-            else:
-                # Ray is horizontal or upward — project to max range along
-                # its horizontal component
+            for idx, (n, e, d) in enumerate(rays):
                 horiz_mag = math.sqrt(n * n + e * e)
-                if horiz_mag > 1e-12:
-                    ground_n = (n / horiz_mag) * max_ground_range
-                    ground_e = (e / horiz_mag) * max_ground_range
+                if horiz_mag < 1e-12:
+                    u_n, u_e = 1.0, 0.0
                 else:
-                    ground_n = max_ground_range
-                    ground_e = 0.0
+                    u_n, u_e = n / horiz_mag, e / horiz_mag
 
-            c_lat = lat + ground_n / 111320.0
-            c_lon = lon + ground_e / (111320.0 * cos_lat)
-            corners_latlon.append((c_lat, c_lon))
+                dist = d_far if idx in (0, 1) else d_near
+                ground_n = u_n * dist
+                ground_e = u_e * dist
 
-            c_lat_clamped = max(-85.05, min(85.05, c_lat))
-            tx, ty = self.latlon_to_tile_frac(c_lat_clamped, c_lon, zoom)
-            corners_tile_frac.append((tx, ty))
+                c_lat = lat + ground_n / 111320.0
+                c_lon = lon + ground_e / (111320.0 * cos_lat)
+                corners_latlon.append((c_lat, c_lon))
 
-        # Bounding box of tiles needed
-        all_tx = [c[0] for c in corners_tile_frac]
-        all_ty = [c[1] for c in corners_tile_frac]
-        min_tx = int(math.floor(min(all_tx)))
-        max_tx = int(math.floor(max(all_tx)))
-        min_ty = int(math.floor(min(all_ty)))
-        max_ty = int(math.floor(max(all_ty)))
+                c_lat_clamped = max(-85.05, min(85.05, c_lat))
+                tx, ty = self.latlon_to_tile_frac(c_lat_clamped, c_lon, zoom)
+                corners_tile_frac.append((tx, ty))
 
-        # Shrink the bounding box symmetrically if it exceeds max_tiles
-        n_cols = max_tx - min_tx + 1
-        n_rows = max_ty - min_ty + 1
-        if n_cols * n_rows > max_tiles:
-            cx_t = (min_tx + max_tx) / 2.0
-            cy_t = (min_ty + max_ty) / 2.0
-            side = int(math.sqrt(max_tiles))
-            min_tx = int(cx_t - side // 2)
-            max_tx = min_tx + side - 1
-            min_ty = int(cy_t - side // 2)
-            max_ty = min_ty + side - 1
+            all_tx = [c[0] for c in corners_tile_frac]
+            all_ty = [c[1] for c in corners_tile_frac]
+            min_tx = int(math.floor(min(all_tx)))
+            max_tx = int(math.floor(max(all_tx)))
+            min_ty = int(math.floor(min(all_ty)))
+            max_ty = int(math.floor(max(all_ty)))
+
+            n_cols = max_tx - min_tx + 1
+            n_rows = max_ty - min_ty + 1
+            if n_cols * n_rows <= max_tiles or attempt == 4:
+                break
+            # Pull far edge closer to fit inside max_tiles while keeping near ground fixed
+            d_far = d_near + (d_far - d_near) * 0.65
+
+        # Check for degenerate footprint (e.g. collinear points or zero area quad)
+        # Order: 0=TL, 1=TR, 2=BL, 3=BR -> polygon vertices: 0, 1, 3, 2
+        c = corners_tile_frac
+        quad = [c[0], c[1], c[3], c[2]]
+        area = 0.5 * abs(sum(quad[i][0] * quad[(i + 1) % 4][1] - quad[(i + 1) % 4][0] * quad[i][1] for i in range(4)))
+        if area < 1e-6:
+            return None
 
         max_tile_idx = 2 ** zoom - 1
         min_tx = max(0, min_tx)
