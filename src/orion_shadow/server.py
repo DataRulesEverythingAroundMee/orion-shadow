@@ -125,22 +125,25 @@ class OrionServer:
                                 if packet:
                                     response_pkt = self.state.update_from_command(packet)
                                 echo_data = response_pkt if response_pkt else full_packet
-                                writer.write(echo_data)
-                                await writer.drain()
                             except Exception as e:
                                 print(f"[!] Error processing TCP packet from {addr}: {e}")
+                                continue
+
+                            if writer.is_closing():
+                                break
+                            writer.write(echo_data)
+                            await writer.drain()
                         else:
                             break
                     else:
                         del buffer[0]
-        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+        except (asyncio.CancelledError, ConnectionError, BrokenPipeError, OSError):
             pass
         except Exception as e:
             print(f"[!] TCP client {addr} error: {e}")
         finally:
             print(f"[-] Closing TCP connection {addr}")
-            if writer in self.tcp_clients:
-                self.tcp_clients.remove(writer)
+            self.tcp_clients.discard(writer)
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -175,14 +178,17 @@ class OrionServer:
             ]
                         
             # Broadcast to UDP clients
-            if self.clients and self.transport and not self.transport.is_closing():
+            transport = self.transport
+            if self.clients and transport and not transport.is_closing():
                 for addr in list(self.clients):
-                    if not self._running or not self.transport or self.transport.is_closing():
+                    if not self._running or not self.transport or transport.is_closing():
                         break
                     try:
                         for p in packets:
-                            self.transport.sendto(p, addr)
+                            transport.sendto(p, addr)
                     except Exception as e:
+                        if not self._running:
+                            break
                         print(f"[!] Error sending UDP telemetry to {addr}: {e}")
                         if addr in self.clients:
                             self.clients.remove(addr)
@@ -192,13 +198,15 @@ class OrionServer:
                 for writer in list(self.tcp_clients):
                     if not self._running:
                         break
+                    if writer.is_closing():
+                        self.tcp_clients.discard(writer)
+                        continue
                     try:
                         for p in packets:
                             writer.write(p)
                         await writer.drain()
                     except Exception:
-                        if writer in self.tcp_clients:
-                            self.tcp_clients.remove(writer)
+                        self.tcp_clients.discard(writer)
 
     def close(self):
         self._running = False
