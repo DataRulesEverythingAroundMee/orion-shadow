@@ -114,17 +114,29 @@ class OrionServer:
         elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
             if len(packet.data) >= 1:
                 details.append(f"switch to camera_index={packet.data[0]}")
-        elif packet.packet_id == OrionPktType.CAMERA_CMD:
-            if len(packet.data) >= 8:
-                zoom, focus = struct.unpack(">ff", packet.data[:8])
-                details.append(f"zoom={zoom:.2f}x, focus={focus:.2f}")
-        elif packet.packet_id == OrionPktType.CAMERA_STATE:
-            if len(packet.data) >= 5:
+        elif packet.packet_id == OrionPktType.CAMERA_CMD or packet.packet_id == OrionPktType.CAMERA_STATE:
+            if len(packet.data) == 0:
+                details.append("request camera state")
+            elif len(packet.data) >= 5 and len(packet.data) < 8:
                 zoom_raw, focus_raw = struct.unpack_from(">hh", packet.data, 0)
                 details.append(f"zoom={zoom_raw / 100.0:.2f}x, focus={focus_raw / 10000.0:.2f}")
             elif len(packet.data) >= 8:
                 zoom, focus = struct.unpack(">ff", packet.data[:8])
                 details.append(f"zoom={zoom:.2f}x, focus={focus:.2f}")
+        elif packet.packet_id == OrionPktType.NETWORK_VIDEO:
+            if len(packet.data) == 0:
+                details.append("request network video settings")
+            else:
+                details.append(f"network video settings ({len(packet.data)} bytes)")
+        elif packet.packet_id == OrionPktType.LASER_STATES:
+            if len(packet.data) == 0:
+                details.append("request laser states")
+        elif packet.packet_id == OrionPktType.VIDEO_OPTIONS:
+            if len(packet.data) == 0:
+                details.append("request video options")
+        elif packet.packet_id == OrionPktType.TRACK_OPTIONS:
+            if len(packet.data) == 0:
+                details.append("request track options")
         elif packet.packet_id == OrionPktType.LASER_CMD:
             if len(packet.data) >= 4:
                 power = struct.unpack(">f", packet.data[:4])[0]
@@ -175,9 +187,15 @@ class OrionServer:
                         if packet:
                             response_pkt = self.state.update_from_command(packet)
                         
-                        echo_data = response_pkt if response_pkt else full_packet
+                        if response_pkt:
+                            echo_data = response_pkt
+                        elif len(packet.data) > 0 or packet.packet_id == OrionPktType.INITIALIZE:
+                            echo_data = full_packet
+                        else:
+                            echo_data = None
+                        
                         # Echo behavior
-                        if self.transport and not self.transport.is_closing():
+                        if echo_data and self.transport and not self.transport.is_closing():
                             self.transport.sendto(echo_data, addr)
                             # Also respond on UDP_IN_PORT (8746) if different, for clients expecting discovery reply on UDP_IN_PORT
                             if self.udp_in_port and addr[1] != self.udp_in_port:
@@ -219,15 +237,21 @@ class OrionServer:
                                 response_pkt = None
                                 if packet:
                                     response_pkt = self.state.update_from_command(packet)
-                                echo_data = response_pkt if response_pkt else full_packet
+                                if response_pkt:
+                                    echo_data = response_pkt
+                                elif len(packet.data) > 0 or packet.packet_id == OrionPktType.INITIALIZE:
+                                    echo_data = full_packet
+                                else:
+                                    echo_data = None
                             except Exception as e:
                                 print(f"[!] Error processing TCP packet from {addr}: {e}")
                                 continue
 
                             if writer.is_closing():
                                 break
-                            writer.write(echo_data)
-                            await writer.drain()
+                            if echo_data:
+                                writer.write(echo_data)
+                                await writer.drain()
                         else:
                             break
                     else:
@@ -260,17 +284,22 @@ class OrionServer:
             self.state.step()
             
             # 2. Broadcast Telemetry to all clients
+            slow_generators = [
+                self.state.get_laser_state_packet,
+                self.state.get_sensor_data_packet,
+                self.state.get_diagnostics_packet,
+                self.state.get_video_options_packet,
+                self.state.get_tracking_options_packet,
+                self.state.get_cameras_packet,
+                self.state.get_faults_packet,
+            ]
+            self._telemetry_tick = getattr(self, "_telemetry_tick", 0) + 1
+            slow_packet = slow_generators[self._telemetry_tick % len(slow_generators)]()
             packets = [
                 self.state.get_geolocate_telemetry_core_packet(),
                 self.state.get_telemetry_packet(),
-                self.state.get_laser_state_packet(),
                 self.state.get_camera_state_packet(),
-                self.state.get_sensor_data_packet(),
-                self.state.get_diagnostics_packet(),
-                self.state.get_video_options_packet(),
-                self.state.get_tracking_options_packet(),
-                self.state.get_cameras_packet(),
-                self.state.get_faults_packet(),
+                slow_packet,
             ]
                         
             # Broadcast to UDP clients

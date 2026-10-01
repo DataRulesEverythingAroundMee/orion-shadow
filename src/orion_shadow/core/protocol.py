@@ -36,7 +36,8 @@ class OrionPktType:
     ADVANCED_ENCODING = 0x5F
     CAMERA_SWITCH = 0x60
     CAMERA_STATE = 0x61
-    CAMERA_CMD = 0x62
+    NETWORK_VIDEO = 0x62
+    CAMERA_CMD = 0x61  # Backwards compatibility alias for CAMERA_STATE
     CAMERAS = 0x63
     KTNC_SETTINGS = 0x6D
     VIDEO_OPTIONS = 0x70

@@ -19,7 +19,7 @@ class ProtocolEngine:
             0x5F: "ORION_PKT_ADVANCED_ENCODING",
             0x60: "ORION_PKT_CAMERA_SWITCH",
             0x61: "ORION_PKT_CAMERA_STATE",
-            0x62: "ORION_PKT_CAMERA_CMD",
+            0x62: "ORION_PKT_NETWORK_VIDEO",
             0x63: "ORION_PKT_CAMERAS",
             0x6D: "ORION_PKT_KTNC_SETTINGS",
             0x70: "ORION_PKT_VIDEO_OPTIONS",
