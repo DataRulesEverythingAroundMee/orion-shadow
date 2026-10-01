@@ -3,13 +3,14 @@ try:
     import numpy as np
 except ImportError:
     np = None
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Dict, Any
 
 
 class TileVisualizer:
     """
     Handles the logic of mapping GimbalState (lat, lon, pan, tilt, zoom) 
     to XYZ tiles from an OSM/XYZ tile server.
+    Supports perspective-correct ground footprint calculation for oblique views.
     """
     def __init__(self, tile_url_template: str, zoom_min: int = 0, zoom_max: int = 20):
         self.tile_url_template = tile_url_template # e.g., "https://{z}/{x}/{y}.png"
@@ -23,6 +24,184 @@ class TileVisualizer:
         x = int((lon + 180.0) / 360.0 * n)
         y = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
         return x, y
+
+    def latlon_to_tile_frac(self, lat: float, lon: float, z: int) -> Tuple[float, float]:
+        """Converts latitude/longitude to fractional tile X/Y for a given zoom level."""
+        lat_rad = math.radians(lat)
+        n = 2.0 ** z
+        x = (lon + 180.0) / 360.0 * n
+        y = (1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n
+        return x, y
+
+    def _corner_rays_ned(self, cam_hdg: float, cam_pitch: float,
+                         hfov: float, vfov: float
+                         ) -> List[Tuple[float, float, float]]:
+        """
+        Compute the 4 FOV corner ray directions in NED (North-East-Down) frame.
+
+        Uses proper 3D rotation from camera frame to NED, accounting for the
+        perspective projection geometry of the camera sensor.
+
+        Camera frame convention: X=right, Y=down, Z=forward (boresight).
+        NED frame: X=North, Y=East, Z=Down.
+
+        Returns list of (N, E, D) unit vectors for [TL, TR, BL, BR] image corners.
+        """
+        # Half-extents on the normalized image plane (focal length = 1)
+        hw = math.tan(math.radians(hfov / 2.0))
+        hh = math.tan(math.radians(vfov / 2.0))
+
+        # Corner directions in camera frame (X=right, Y=down, Z=forward)
+        corners_cam = [
+            (-hw, -hh, 1.0),  # Top-left:     left,  up
+            ( hw, -hh, 1.0),  # Top-right:    right, up
+            (-hw,  hh, 1.0),  # Bottom-left:  left,  down
+            ( hw,  hh, 1.0),  # Bottom-right: right, down
+        ]
+
+        hdg_rad = math.radians(cam_hdg)
+        pitch_rad = math.radians(cam_pitch)
+        cos_h, sin_h = math.cos(hdg_rad), math.sin(hdg_rad)
+        cos_p, sin_p = math.cos(pitch_rad), math.sin(pitch_rad)
+
+        # Camera basis vectors expressed in NED
+        # Forward (boresight) in NED: azimuth=cam_hdg, elevation=cam_pitch
+        fwd = (cos_p * cos_h, cos_p * sin_h, -sin_p)
+        # Right: horizontal perpendicular (heading + 90°), assumes zero roll
+        right = (-sin_h, cos_h, 0.0)
+        # Down (camera Y-axis): fwd × right
+        down = (sin_p * cos_h, sin_p * sin_h, cos_p)
+
+        rays = []
+        for cx, cy, cz in corners_cam:
+            # Transform camera-frame direction to NED
+            n = cx * right[0] + cy * down[0] + cz * fwd[0]
+            e = cx * right[1] + cy * down[1] + cz * fwd[1]
+            d = cx * right[2] + cy * down[2] + cz * fwd[2]
+            mag = math.sqrt(n * n + e * e + d * d)
+            if mag > 1e-12:
+                rays.append((n / mag, e / mag, d / mag))
+            else:
+                rays.append((0.0, 0.0, 1.0))
+        return rays
+
+    def compute_footprint(self, lat: float, lon: float, alt: float,
+                          cam_hdg: float, cam_pitch: float,
+                          hfov: float, vfov: float, zoom: int,
+                          max_ground_range: float = 20000.0,
+                          max_tiles: int = 400
+                          ) -> Optional[Dict[str, Any]]:
+        """
+        Compute the camera's perspective ground footprint as a quadrilateral.
+
+        Casts rays from the camera through each of the four image corners to a
+        flat ground plane, then determines which map tiles fall within the
+        resulting trapezoid.
+
+        At oblique angles (e.g. -45° tilt) the far edge of the image sees more
+        ground than the near edge, producing the characteristic trapezoidal
+        footprint that distinguishes a perspective view from a nadir view.
+
+        Args:
+            lat, lon: Aircraft position in degrees
+            alt: Altitude above ground in meters (must be > 0)
+            cam_hdg: Camera heading in degrees (0=North, 90=East)
+            cam_pitch: Camera pitch in degrees (negative = looking down)
+            hfov, vfov: Horizontal/vertical FOV in degrees
+            zoom: Tile zoom level
+            max_ground_range: Cap for near-horizontal rays (meters)
+            max_tiles: Maximum tiles to return (bounding box is shrunk to fit)
+
+        Returns:
+            Dict with:
+              corners_latlon      – [(lat,lon)] for TL, TR, BL, BR image corners
+              corners_tile_frac   – [(tx,ty)]   fractional tile coordinates
+              tile_bounds         – (min_tx, min_ty, max_tx, max_ty)
+              tiles               – [(z, x, y)] list of tiles to fetch
+            or None if alt <= 0 or zoom is out of range.
+        """
+        if alt <= 0:
+            return None
+        if not (self.zoom_min <= zoom <= self.zoom_max):
+            return None
+
+        rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov)
+
+        cos_lat = math.cos(math.radians(lat))
+        if abs(cos_lat) < 1e-10:
+            cos_lat = 1e-10
+
+        corners_latlon = []
+        corners_tile_frac = []
+
+        for n, e, d in rays:
+            if d > 1e-6:
+                # Ray points downward — intersect with ground plane (Down = alt)
+                t = alt / d
+                ground_n = t * n
+                ground_e = t * e
+                # Cap extreme ranges from shallow-angle rays
+                ground_dist = math.sqrt(ground_n * ground_n + ground_e * ground_e)
+                if ground_dist > max_ground_range:
+                    scale = max_ground_range / ground_dist
+                    ground_n *= scale
+                    ground_e *= scale
+            else:
+                # Ray is horizontal or upward — project to max range along
+                # its horizontal component
+                horiz_mag = math.sqrt(n * n + e * e)
+                if horiz_mag > 1e-12:
+                    ground_n = (n / horiz_mag) * max_ground_range
+                    ground_e = (e / horiz_mag) * max_ground_range
+                else:
+                    ground_n = max_ground_range
+                    ground_e = 0.0
+
+            c_lat = lat + ground_n / 111320.0
+            c_lon = lon + ground_e / (111320.0 * cos_lat)
+            corners_latlon.append((c_lat, c_lon))
+
+            c_lat_clamped = max(-85.05, min(85.05, c_lat))
+            tx, ty = self.latlon_to_tile_frac(c_lat_clamped, c_lon, zoom)
+            corners_tile_frac.append((tx, ty))
+
+        # Bounding box of tiles needed
+        all_tx = [c[0] for c in corners_tile_frac]
+        all_ty = [c[1] for c in corners_tile_frac]
+        min_tx = int(math.floor(min(all_tx)))
+        max_tx = int(math.floor(max(all_tx)))
+        min_ty = int(math.floor(min(all_ty)))
+        max_ty = int(math.floor(max(all_ty)))
+
+        # Shrink the bounding box symmetrically if it exceeds max_tiles
+        n_cols = max_tx - min_tx + 1
+        n_rows = max_ty - min_ty + 1
+        if n_cols * n_rows > max_tiles:
+            cx_t = (min_tx + max_tx) / 2.0
+            cy_t = (min_ty + max_ty) / 2.0
+            side = int(math.sqrt(max_tiles))
+            min_tx = int(cx_t - side // 2)
+            max_tx = min_tx + side - 1
+            min_ty = int(cy_t - side // 2)
+            max_ty = min_ty + side - 1
+
+        max_tile_idx = 2 ** zoom - 1
+        min_tx = max(0, min_tx)
+        max_tx = min(max_tile_idx, max_tx)
+        min_ty = max(0, min_ty)
+        max_ty = min(max_tile_idx, max_ty)
+
+        tiles = []
+        for ty in range(min_ty, max_ty + 1):
+            for tx in range(min_tx, max_tx + 1):
+                tiles.append((zoom, tx, ty))
+
+        return {
+            'corners_latlon': corners_latlon,
+            'corners_tile_frac': corners_tile_frac,
+            'tile_bounds': (min_tx, min_ty, max_tx, max_ty),
+            'tiles': tiles,
+        }
 
     def get_visible_tiles(self, lat: float, lon: float, pan: float, tilt: float, zoom: int) -> List[Tuple[int, int, int]]:
         """
@@ -45,4 +224,3 @@ class TileVisualizer:
                 tiles.append((zoom, zx + dx, zy + dy))
         
         return tiles
-

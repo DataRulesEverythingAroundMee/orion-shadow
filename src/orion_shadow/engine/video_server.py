@@ -98,7 +98,7 @@ class VideoServer:
                     nparr = np.frombuffer(content, np.uint8)
                     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                     if img is not None:
-                        if len(self.tile_cache) > 256:
+                        if len(self.tile_cache) > 1024:
                             self.tile_cache.pop(next(iter(self.tile_cache)))
                         self.tile_cache[cache_key] = img
                         return img
@@ -156,6 +156,34 @@ class VideoServer:
         ppd_v = self.height / vfov
         ppd_h = self.width / hfov
         return hfov, vfov, ppd_h, ppd_v
+
+    def _compute_tile_zoom(self, lat: float, alt: float,
+                           cam_pitch: float, hfov: float) -> int:
+        """
+        Compute the optimal XYZ tile zoom level so tile resolution matches
+        the camera's ground sample distance (GSD) at the boresight.
+
+        Higher camera zoom (narrower FOV) or lower altitude produces a higher
+        tile zoom level, yielding sharper satellite/map imagery.
+        """
+        # Depression angle at boresight (degrees below horizontal)
+        depression = max(5.0, -cam_pitch)
+        boresight_dist = alt / math.tan(math.radians(depression))
+        # Ground width visible across the full image
+        ground_width = 2.0 * boresight_dist * math.tan(math.radians(hfov / 2.0))
+        # Output GSD: meters per output pixel
+        output_gsd = ground_width / max(1, self.width)
+
+        # Tile GSD at zoom z: C·cos(lat) / (2^z · 256)
+        # Solve for z where tile GSD ≤ output GSD
+        EARTH_CIRCUMFERENCE = 40075016.686
+        cos_lat = math.cos(math.radians(lat))
+        if output_gsd > 0:
+            z = math.log2(EARTH_CIRCUMFERENCE * cos_lat / (256.0 * output_gsd))
+            z = int(math.ceil(z))
+        else:
+            z = 17
+        return max(15, min(17, z))
 
     def _generate_synthetic_background(self) -> Any:
         """
@@ -373,48 +401,123 @@ class VideoServer:
             self.current_frame = self._draw_hud(base_frame)
             return
 
-        # If visualizer is enabled, attempt tile stitching
+        # If visualizer is enabled, attempt perspective-correct tile rendering
         if self.visualizer is not None and np is not None and cv2 is not None:
-            zoom = 15
             telem = self._get_telemetry()
-            tiles_to_fetch = self.visualizer.get_visible_tiles(
-                telem['lat'],
-                telem['lon'],
-                telem['pan'],
-                telem['tilt'],
-                zoom
-            )
+            hfov, vfov, _, _ = self._get_fov(telem['zoom'])
+            alt = telem['alt']
 
-            results = []
+            # Adaptive zoom: pick tile zoom level matching the camera's GSD
+            zoom = self._compute_tile_zoom(
+                telem['lat'], max(10.0, alt), telem['cam_pitch'], hfov
+            ) if alt >= 10.0 else 17
+
+            # Use perspective footprint when altitude is sufficient
+            footprint = None
+            if alt >= 10.0:
+                footprint = self.visualizer.compute_footprint(
+                    telem['lat'], telem['lon'], alt,
+                    telem['cam_hdg'], telem['cam_pitch'],
+                    hfov, vfov, zoom, max_tiles=600
+                )
+
+            tiles_to_fetch = []
+            if footprint and footprint['tiles']:
+                tiles_to_fetch = footprint['tiles']
+            else:
+                # Fallback: center + neighbors when footprint unavailable
+                tiles_to_fetch = self.visualizer.get_visible_tiles(
+                    telem['lat'], telem['lon'],
+                    telem['pan'], telem['tilt'], zoom
+                )
+
+            tile_results = {}
             if tiles_to_fetch and self.session is not None:
-                tasks = [self._fetch_tile(z, x, y) for z, x, y in tiles_to_fetch]
-                results = await asyncio.gather(*tasks)
+                fetch_tasks = {(z, x, y): self._fetch_tile(z, x, y)
+                               for z, x, y in tiles_to_fetch}
+                fetched = await asyncio.gather(*fetch_tasks.values())
+                for key, img in zip(fetch_tasks.keys(), fetched):
+                    tile_results[key] = img
 
-            has_valid_tiles = any(img is not None for img in results)
-            if has_valid_tiles:
+            has_valid_tiles = any(img is not None for img in tile_results.values())
+            if has_valid_tiles and footprint:
+                # --- Perspective-correct tile compositing ---
+                min_tx, min_ty, max_tx, max_ty = footprint['tile_bounds']
+                n_cols = max_tx - min_tx + 1
+                n_rows = max_ty - min_ty + 1
+
+                # Tile render size — keep the ground-plane image high-res
+                # to avoid blurry output after the perspective warp
+                total_tiles = n_cols * n_rows
+                if total_tiles > 200:
+                    tile_px = 128
+                elif total_tiles > 64:
+                    tile_px = 192
+                else:
+                    tile_px = 256
+
+                # Stitch tiles into a ground-plane image
+                ground = np.zeros((n_rows * tile_px, n_cols * tile_px, 3),
+                                  dtype=np.uint8)
+                for (z, tx, ty), img in tile_results.items():
+                    if img is not None:
+                        col = tx - min_tx
+                        row = ty - min_ty
+                        if 0 <= col < n_cols and 0 <= row < n_rows:
+                            resized = cv2.resize(img, (tile_px, tile_px))
+                            ground[row * tile_px:(row + 1) * tile_px,
+                                   col * tile_px:(col + 1) * tile_px] = resized
+
+                # Perspective warp: ground-plane → camera image
+                # Source points are where each FOV corner intersects the
+                # ground-plane image (fractional tile coords → pixel coords)
+                corners_frac = footprint['corners_tile_frac']
+                src_pts = np.float32([
+                    [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
+                    for c in corners_frac
+                ])
+                dst_pts = np.float32([
+                    [0,              0],               # Top-left
+                    [self.width - 1, 0],               # Top-right
+                    [0,              self.height - 1],  # Bottom-left
+                    [self.width - 1, self.height - 1],  # Bottom-right
+                ])
+
+                M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+                frame = cv2.warpPerspective(ground, M,
+                                            (self.width, self.height),
+                                            borderMode=cv2.BORDER_CONSTANT,
+                                            borderValue=(0, 0, 0))
+                self.current_frame = self._draw_hud(frame)
+                return
+
+            elif has_valid_tiles:
+                # Flat fallback when no footprint (altitude too low / unavailable)
                 tile_size = 160
-                composite = np.zeros((3 * tile_size, 3 * tile_size, 3), dtype=np.uint8)
-
+                composite = np.zeros((3 * tile_size, 3 * tile_size, 3),
+                                     dtype=np.uint8)
+                tile_list = list(tile_results.values())
                 idx = 0
                 for dy in range(3):
                     for dx in range(3):
-                        if idx < len(results):
-                            img = results[idx]
-                            if img is not None:
-                                resized = cv2.resize(img, (tile_size, tile_size))
-                                composite[dy * tile_size: (dy + 1) * tile_size,
-                                          dx * tile_size: (dx + 1) * tile_size] = resized
+                        if idx < len(tile_list) and tile_list[idx] is not None:
+                            resized = cv2.resize(tile_list[idx],
+                                                 (tile_size, tile_size))
+                            composite[dy * tile_size:(dy + 1) * tile_size,
+                                      dx * tile_size:(dx + 1) * tile_size] = resized
                         idx += 1
 
-                # Rotate composite by camera heading
-                rot_mat = cv2.getRotationMatrix2D((composite.shape[1] // 2, composite.shape[0] // 2), -telem['cam_hdg'], 1.0)
-                rotated = cv2.warpAffine(composite, rot_mat, (composite.shape[1], composite.shape[0]))
+                rot_mat = cv2.getRotationMatrix2D(
+                    (composite.shape[1] // 2, composite.shape[0] // 2),
+                    -telem['cam_hdg'], 1.0)
+                rotated = cv2.warpAffine(composite, rot_mat,
+                                         (composite.shape[1], composite.shape[0]))
 
-                # Place in center of frame
                 frame = np.zeros((self.height, self.width, 3), dtype=np.uint8)
-                start_x = (self.width - (3 * tile_size)) // 2
-                start_y = (self.height - (3 * tile_size)) // 2
-                frame[start_y: start_y + 3 * tile_size, start_x: start_x + 3 * tile_size] = rotated
+                sx = (self.width - 3 * tile_size) // 2
+                sy = (self.height - 3 * tile_size) // 2
+                frame[sy:sy + 3 * tile_size,
+                      sx:sx + 3 * tile_size] = rotated
                 self.current_frame = self._draw_hud(frame)
                 return
 
