@@ -448,13 +448,14 @@ class OrionServer:
         
         try:
             await asyncio.gather(*self._tasks)
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, KeyboardInterrupt):
             pass
         finally:
             self._running = False
             for t in self._tasks:
                 if not t.done():
                     t.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
             if self.tcp_server:
                 self.tcp_server.close()
                 await self.tcp_server.wait_closed()

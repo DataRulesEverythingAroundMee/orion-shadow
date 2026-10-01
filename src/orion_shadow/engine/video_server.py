@@ -72,7 +72,7 @@ class VideoServer:
 
         self.session = None
         self.current_frame = None
-        self.proc: Optional[subprocess.Popen] = None
+        self.proc: Optional[Any] = None
         self.sock: Optional[socket.socket] = None
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         self.tile_cache: Dict[Tuple[int, int, int], Any] = {}
@@ -728,7 +728,22 @@ class VideoServer:
         base_frame = self._generate_synthetic_background()
         self.current_frame = self._draw_hud(base_frame)
 
-    def _start_ffmpeg(self) -> Optional[subprocess.Popen]:
+    def _init_fallback_socket(self):
+        """Initializes fallback UDP socket for multicast video streaming."""
+        if self.sock is not None:
+            return
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        try:
+            self.sock.setsockopt(
+                socket.IPPROTO_IP, 
+                socket.IP_MULTICAST_IF, 
+                socket.inet_aton(self._detect_local_ip())
+            )
+        except Exception:
+            pass
+
+    async def _start_ffmpeg(self) -> Optional[Any]:
         """Launches ffmpeg to encode raw video to MPEG-TS over UDP multicast."""
         if not self.has_ffmpeg:
             return None
@@ -741,6 +756,8 @@ class VideoServer:
         cmd = [
             "ffmpeg",
             "-y",
+            "-nostats",
+            "-loglevel", "warning",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "-s", f"{self.width}x{self.height}",
@@ -755,11 +772,11 @@ class VideoServer:
         ]
 
         try:
-            return subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE
+            return await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
             )
         except Exception as e:
             print(f"[!] Warning: Failed to spawn ffmpeg: {e}")
@@ -774,7 +791,7 @@ class VideoServer:
         print(f"[+] Multicast Video Stream broadcasting on udp://@{self.multicast_group}:{self.port}")
         print(f"[*] Connect via ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 -framedrop -sync video udp://@{self.multicast_group}:{self.port}")
 
-        self.proc = self._start_ffmpeg()
+        self.proc = await self._start_ffmpeg()
 
         # Start predictive background prefetcher if enabled
         if self.prefetch_enabled and self.visualizer:
@@ -783,16 +800,7 @@ class VideoServer:
         # Fallback socket if ffmpeg is unavailable
         if self.proc is None:
             print("[*] Using direct UDP multicast socket fallback")
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-            try:
-                self.sock.setsockopt(
-                    socket.IPPROTO_IP, 
-                    socket.IP_MULTICAST_IF, 
-                    socket.inet_aton(self._detect_local_ip())
-                )
-            except Exception:
-                pass
+            self._init_fallback_socket()
 
         frame_interval = 1.0 / self.fps
         next_frame_time = time.perf_counter()
@@ -815,20 +823,23 @@ class VideoServer:
 
                     if self.proc and self.proc.stdin:
                         try:
-                            # Write to ffmpeg's stdin in a thread executor to avoid
-                            # blocking the asyncio event loop. A blocking write when
-                            # ffmpeg's pipe buffer is full would freeze all UDP/TCP
-                            # command handling, causing the server to lock up.
-                            loop = asyncio.get_event_loop()
-                            stdin = self.proc.stdin
-                            _raw = raw_bytes
-                            await loop.run_in_executor(
-                                None,
-                                lambda: (stdin.write(_raw), stdin.flush())
-                            )
-                        except (BrokenPipeError, OSError):
-                            print("[!] ffmpeg pipe disconnected, attempting restart...")
-                            self.proc = self._start_ffmpeg()
+                            self.proc.stdin.write(raw_bytes)
+                            await asyncio.wait_for(self.proc.stdin.drain(), timeout=1.0)
+                        except (BrokenPipeError, ConnectionResetError, OSError, asyncio.TimeoutError) as e:
+                            print(f"[!] ffmpeg pipe error ({e}), attempting restart...")
+                            try:
+                                if self.proc.stdin:
+                                    self.proc.stdin.close()
+                            except Exception:
+                                pass
+                            try:
+                                self.proc.terminate()
+                            except Exception:
+                                pass
+                            self.proc = await self._start_ffmpeg()
+                            if self.proc is None and self.sock is None:
+                                print("[*] Switching to direct UDP multicast socket fallback")
+                                self._init_fallback_socket()
                     elif self.sock and cv2 is not None and isinstance(self.current_frame, np.ndarray):
                         # Send compressed JPEG over UDP
                         _, enc = cv2.imencode('.jpg', self.current_frame, [cv2.IMWRITE_JPEG_QUALITY, 60])
@@ -855,12 +866,26 @@ class VideoServer:
                 self._prefetch_task.cancel()
             if self.proc:
                 try:
-                    if self.proc.stdin:
-                        self.proc.stdin.close()
                     self.proc.terminate()
-                    self.proc.wait(timeout=1.0)
+                except ProcessLookupError:
+                    pass
                 except Exception:
                     pass
+                try:
+                    if self.proc.stdin:
+                        self.proc.stdin.close()
+                        await asyncio.wait_for(self.proc.stdin.wait_closed(), timeout=0.5)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(self.proc.wait(), timeout=0.5)
+                except (asyncio.TimeoutError, Exception):
+                    try:
+                        self.proc.kill()
+                        await asyncio.wait_for(self.proc.wait(), timeout=0.5)
+                    except Exception:
+                        pass
+                self.proc = None
             if self.sock:
                 try:
                     self.sock.close()
