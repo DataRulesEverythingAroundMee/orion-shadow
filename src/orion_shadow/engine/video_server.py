@@ -52,12 +52,16 @@ class VideoServer:
         width: int = 640,
         height: int = 480,
         max_tile_zoom: int = 17,
-        tile_zoom: Optional[int] = None
+        tile_zoom: Optional[int] = None,
+        prefetch_enabled: bool = True,
+        prefetch_distance: float = 3000.0
     ):
         self.state = state
         self.tile_url_template = tile_url_template
         self.max_tile_zoom = max_tile_zoom
         self.fixed_tile_zoom = tile_zoom
+        self.prefetch_enabled = prefetch_enabled
+        self.prefetch_distance = prefetch_distance
         self.visualizer = TileVisualizer(tile_url_template, zoom_max=max(20, max_tile_zoom)) if tile_url_template else None
         self.multicast_group = multicast_group
         self.port = port
@@ -74,6 +78,7 @@ class VideoServer:
         self.tile_cache: Dict[Tuple[int, int, int], Any] = {}
         self._pending_tile_fetches: Set[Tuple[int, int, int]] = set()
         self._fetch_semaphore: Optional[asyncio.Semaphore] = None
+        self._prefetch_task: Optional[asyncio.Task] = None
 
         # Pre-allocated output frame buffer (avoids allocation every frame)
         self._frame_buf: Optional[Any] = None
@@ -141,6 +146,65 @@ class VideoServer:
             return self.tile_cache[cache_key]
         await self._fetch_tile_worker(z, x, y)
         return self.tile_cache.get(cache_key)
+
+    async def _prefetch_loop(self):
+        """
+        Background task that periodically calculates future aircraft positions
+        and camera view areas along the aircraft's flight path, pre-populating the tile cache
+        so tiles are already in memory before being rendered.
+        """
+        while True:
+            try:
+                await asyncio.sleep(0.5)
+                if not self.prefetch_enabled or self.visualizer is None or self.session is None or self.session.closed:
+                    continue
+
+                telem = self._get_telemetry()
+                lat = telem['lat']
+                lon = telem['lon']
+                alt = telem['alt']
+                ac_hdg = telem['ac_hdg']
+                cam_hdg = telem['cam_hdg']
+                cam_pitch = telem['cam_pitch']
+                zoom_val = telem['zoom']
+
+                # Skip prefetch if no valid coordinates yet
+                if abs(lat) < 0.0001 and abs(lon) < 0.0001 and alt <= 0.0:
+                    continue
+
+                hfov, vfov, _, _ = self._get_fov(zoom_val)
+                tile_zoom = self._compute_tile_zoom(lat, max(10.0, alt), cam_pitch, hfov) if alt >= 10.0 else (self.fixed_tile_zoom or min(17, self.max_tile_zoom))
+
+                # Compute lookahead tiles along aircraft heading and camera orientation
+                future_tiles = self.visualizer.get_prefetch_tiles(
+                    lat=lat,
+                    lon=lon,
+                    alt=alt,
+                    ac_hdg=ac_hdg,
+                    cam_hdg=cam_hdg,
+                    cam_pitch=cam_pitch,
+                    hfov=hfov,
+                    vfov=vfov,
+                    zoom=tile_zoom,
+                    lookahead_distance=self.prefetch_distance,
+                    steps=4
+                )
+
+                # Filter for tiles not yet in cache or pending
+                to_prefetch = [
+                    t for t in future_tiles
+                    if t not in self.tile_cache and t not in self._pending_tile_fetches
+                ]
+
+                # Queue background downloads in manageable batches
+                for key in to_prefetch[:48]:
+                    self._pending_tile_fetches.add(key)
+                    asyncio.create_task(self._fetch_tile_worker(*key))
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
 
     def _get_telemetry(self) -> Dict[str, Any]:
         """Extracts current gimbal, aircraft, and sensor telemetry."""
@@ -655,6 +719,10 @@ class VideoServer:
 
         self.proc = self._start_ffmpeg()
 
+        # Start predictive background prefetcher if enabled
+        if self.prefetch_enabled and self.visualizer:
+            self._prefetch_task = asyncio.create_task(self._prefetch_loop())
+
         # Fallback socket if ffmpeg is unavailable
         if self.proc is None:
             print("[*] Using direct UDP multicast socket fallback")
@@ -713,6 +781,8 @@ class VideoServer:
                     await asyncio.sleep(0.001)
 
         finally:
+            if self._prefetch_task and not self._prefetch_task.done():
+                self._prefetch_task.cancel()
             if self.proc:
                 try:
                     if self.proc.stdin:

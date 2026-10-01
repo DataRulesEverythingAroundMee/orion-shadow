@@ -37,7 +37,8 @@ class OrionServer:
                  tile_url: Optional[str] = None, video_port: int = 5004,
                  multicast_group: str = '239.255.0.1', video_enabled: bool = True,
                  log_level: str = 'warning', video_fps: int = 24,
-                 max_tile_zoom: int = 17, tile_zoom: Optional[int] = None):
+                 max_tile_zoom: int = 17, tile_zoom: Optional[int] = None,
+                 prefetch: bool = True, prefetch_distance: float = 3000.0):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -76,7 +77,9 @@ class OrionServer:
                 host=host,
                 fps=video_fps,
                 max_tile_zoom=max_tile_zoom,
-                tile_zoom=tile_zoom
+                tile_zoom=tile_zoom,
+                prefetch_enabled=prefetch,
+                prefetch_distance=prefetch_distance
             )
 
     def _format_packet_details(self, packet: OrionPacket) -> str:
@@ -396,9 +399,11 @@ if __name__ == "__main__":
     parser.add_argument("--tile-url", type=str, default=None, help="XYZ tile URL template (e.g. 'https://{z}/{x}/{y}.png')")
     parser.add_argument("--multicast-group", type=str, default="239.255.0.1", help="Multicast IP address for video stream (default: 239.255.0.1)")
     parser.add_argument("--video-port", type=int, default=5004, help="Multicast UDP port for video stream (default: 5004)")
-    parser.add_argument("--fps", "--video-fps", type=int, default=16, dest="fps", help="Video stream framerate in FPS (default: 16)")
+    parser.add_argument("--fps", "--video-fps", type=int, default=24, dest="fps", help="Video stream framerate in FPS (default: 24)")
     parser.add_argument("--tile-zoom", "--zoom", type=int, default=None, dest="tile_zoom", help="Fixed XYZ tile zoom level (e.g. 14..19, default: adaptive)")
     parser.add_argument("--max-tile-zoom", type=int, default=17, help="Maximum tile zoom level for adaptive resolution (default: 17)")
+    parser.add_argument("--no-prefetch", action="store_false", dest="prefetch", help="Disable lookahead tile prefetching ahead of aircraft")
+    parser.add_argument("--prefetch-distance", type=float, default=3000.0, help="Lookahead distance in meters for prefetching tiles ahead of aircraft (default: 3000.0m)")
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
     parser.add_argument("--logger", "--log-level", default="warning", dest="log_level",
                         choices=["debug", "info", "warning", "error", "critical"],
@@ -420,7 +425,9 @@ if __name__ == "__main__":
         log_level=args.log_level,
         video_fps=args.fps,
         max_tile_zoom=args.max_tile_zoom,
-        tile_zoom=args.tile_zoom
+        tile_zoom=args.tile_zoom,
+        prefetch=args.prefetch,
+        prefetch_distance=args.prefetch_distance
     )
     try:
         asyncio.run(server.run())

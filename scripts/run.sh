@@ -19,6 +19,8 @@ TILE_URL=""
 FPS=""
 TILE_ZOOM=""
 MAX_TILE_ZOOM=""
+PREFETCH_DISTANCE=""
+NO_PREFETCH=""
 
 LOGGER="INFO"
 
@@ -36,6 +38,8 @@ while [[ "$#" -gt 0 ]]; do
         --fps|--video-fps) FPS="$2"; shift ;;
         --tile-zoom|--zoom) TILE_ZOOM="$2"; shift ;;
         --max-tile-zoom) MAX_TILE_ZOOM="$2"; shift ;;
+        --prefetch-distance) PREFETCH_DISTANCE="$2"; shift ;;
+        --no-prefetch) NO_PREFETCH="1" ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
@@ -66,6 +70,14 @@ fi
 
 if [ -n "$MAX_TILE_ZOOM" ]; then
     CMD="$CMD --max-tile-zoom \"$MAX_TILE_ZOOM\""
+fi
+
+if [ -n "$PREFETCH_DISTANCE" ]; then
+    CMD="$CMD --prefetch-distance \"$PREFETCH_DISTANCE\""
+fi
+
+if [ -n "$NO_PREFETCH" ]; then
+    CMD="$CMD --no-prefetch"
 fi
 
 echo "Starting OrionShadow Simulator..."

@@ -224,3 +224,59 @@ class TileVisualizer:
                 tiles.append((zoom, zx + dx, zy + dy))
         
         return tiles
+
+    def get_prefetch_tiles(self, lat: float, lon: float, alt: float,
+                           ac_hdg: float, cam_hdg: float, cam_pitch: float,
+                           hfov: float, vfov: float, zoom: int,
+                           lookahead_distance: float = 3000.0,
+                           steps: int = 4,
+                           max_tiles: int = 300
+                           ) -> List[Tuple[int, int, int]]:
+        """
+        Calculates XYZ tiles in front of the aircraft along its flight path and camera view
+        to prefetch into cache before they become visible.
+
+        Samples multiple points ahead of the aircraft (up to lookahead_distance)
+        and computes the future camera footprints along the aircraft's track.
+        """
+        if not (self.zoom_min <= zoom <= self.zoom_max):
+            return []
+
+        tiles_set = set()
+        hdg_rad = math.radians(ac_hdg)
+        cos_hdg = math.cos(hdg_rad)
+        sin_hdg = math.sin(hdg_rad)
+
+        cos_lat = math.cos(math.radians(lat))
+        if abs(cos_lat) < 1e-10:
+            cos_lat = 1e-10
+
+        # Sample points along forward flight track
+        step_dist = max(200.0, lookahead_distance / max(1, steps))
+        curr_dist = step_dist
+        while curr_dist <= lookahead_distance + 1.0:
+            dn = curr_dist * cos_hdg
+            de = curr_dist * sin_hdg
+            fwd_lat = lat + dn / 111320.0
+            fwd_lon = lon + de / (111320.0 * cos_lat)
+
+            # 1. Perspective footprint at predicted future position
+            if alt >= 10.0:
+                fp = self.compute_footprint(
+                    fwd_lat, fwd_lon, alt,
+                    cam_hdg, cam_pitch,
+                    hfov, vfov, zoom,
+                    max_tiles=max_tiles
+                )
+                if fp and fp['tiles']:
+                    tiles_set.update(fp['tiles'])
+
+            # 2. Direct ground track tile + neighbors
+            zx, zy = self.latlon_to_tile(fwd_lat, fwd_lon, zoom)
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    tiles_set.add((zoom, zx + dx, zy + dy))
+
+            curr_dist += step_dist
+
+        return list(tiles_set)

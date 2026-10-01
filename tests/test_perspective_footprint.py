@@ -187,6 +187,61 @@ def test_adaptive_zoom_increases_with_camera_zoom():
     assert z_narrow <= 17, f"Maximum zoom should be 17, got {z_narrow}"
 
 
+def test_prefetch_tiles_along_aircraft_heading():
+    """Prefetch tiles should project ahead along the aircraft's heading vector."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    
+    # Aircraft at 40.0N, -74.0W flying North (hdg=0)
+    tiles_north = viz.get_prefetch_tiles(
+        lat=40.0, lon=-74.0, alt=1000.0,
+        ac_hdg=0.0, cam_hdg=0.0, cam_pitch=-45.0,
+        hfov=47.7, vfov=35.8, zoom=16,
+        lookahead_distance=3000.0
+    )
+    assert len(tiles_north) > 0
+
+    # Aircraft current tile Y
+    _, curr_zy = viz.latlon_to_tile(40.0, -74.0, 16)
+    
+    # In Slippy Map / Web Mercator, northward means lower Y tile index
+    min_y = min(t[2] for t in tiles_north)
+    assert min_y < curr_zy, f"Prefetched tiles going north should include tile Y < {curr_zy}, got min {min_y}"
+
+
+def test_prefetch_tiles_east_heading():
+    """Aircraft flying East (hdg=90) should prefetch tiles to the east (higher X tile index)."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    
+    # Aircraft at 40.0N, -74.0W flying East (hdg=90)
+    tiles_east = viz.get_prefetch_tiles(
+        lat=40.0, lon=-74.0, alt=1000.0,
+        ac_hdg=90.0, cam_hdg=90.0, cam_pitch=-45.0,
+        hfov=47.7, vfov=35.8, zoom=16,
+        lookahead_distance=3000.0
+    )
+    assert len(tiles_east) > 0
+
+    curr_zx, _ = viz.latlon_to_tile(40.0, -74.0, 16)
+    max_x = max(t[1] for t in tiles_east)
+    assert max_x > curr_zx, f"Prefetched tiles going east should include tile X > {curr_zx}, got max {max_x}"
+
+
+def test_video_server_prefetch_configuration():
+    """Verify VideoServer and OrionServer initialize and respect prefetch configuration."""
+    from orion_shadow.core.state import GimbalState
+    from orion_shadow.engine.video_server import VideoServer
+    from orion_shadow.server import OrionServer
+
+    state = GimbalState()
+    vs = VideoServer(state, prefetch_enabled=True, prefetch_distance=5000.0)
+    assert vs.prefetch_enabled is True
+    assert vs.prefetch_distance == 5000.0
+
+    server = OrionServer(prefetch=False, prefetch_distance=2000.0)
+    assert server.video_server.prefetch_enabled is False
+    assert server.video_server.prefetch_distance == 2000.0
+
+
 if __name__ == '__main__':
     tests = [
         test_nadir_footprint_is_symmetric,
@@ -199,6 +254,9 @@ if __name__ == '__main__':
         test_corner_ray_ned_straight_down,
         test_corner_ray_ned_looking_north_oblique,
         test_adaptive_zoom_increases_with_camera_zoom,
+        test_prefetch_tiles_along_aircraft_heading,
+        test_prefetch_tiles_east_heading,
+        test_video_server_prefetch_configuration,
     ]
     for t in tests:
         try:
