@@ -670,14 +670,23 @@ class VideoServer:
                             [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
                             for c in corners_frac
                         ])
-                        # Ground map always warps to the full frame height (top = row 0).
-                        # compute_footprint already encodes the correct perspective geometry
-                        # for the current tilt angle; constraining dst to y_top would
-                        # artificially shrink the ground area and produce a false
-                        # altitude-gain effect when tilting the gimbal upward.
+                        # The far footprint corners (TL, TR) represent the horizon ground —
+                        # the farthest visible point along the camera's forward view.
+                        # Physically, this ground appears at the horizon line in the image
+                        # (row sky_top). Mapping TL/TR to row sky_top is the geometrically
+                        # correct transform: the perspective warp then correctly interpolates
+                        # tile content between the far (horizon) and near (bottom) ground
+                        # across the rows sky_top..height-1, and the sky compositing
+                        # covers rows 0..sky_top-1.
+                        #
+                        # Mapping far corners to row 0 (previous approach) was wrong: the
+                        # sky overlay would hide those tiles, and the slice of the warp
+                        # visible below sky_top started from an intermediate distance —
+                        # much closer than the actual horizon — creating the false altitude-
+                        # gain illusion exactly when sky first became visible.
                         dst_pts = np.float32([
-                            [0,              0],
-                            [self.width - 1, 0],
+                            [0,              sky_top],
+                            [self.width - 1, sky_top],
                             [0,              self.height - 1],
                             [self.width - 1, self.height - 1],
                         ])
