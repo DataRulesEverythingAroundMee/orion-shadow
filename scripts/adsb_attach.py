@@ -416,7 +416,7 @@ class ADSBClient:
 class OrionBridge:
     """Maintains a UDP link to the Orion server and streams GPS, heading, and gimbal/camera packets."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 5000, tilt_deg: float = 45.0):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8745, tilt_deg: float = 45.0):
         self.host = host
         self.port = port
         self.tilt_deg = tilt_deg
@@ -998,7 +998,7 @@ def main():
                         help="ADS-B endpoint URL or template (e.g. 'https://api.airplanes.live/v2/point/{lat}/{lon}/{radius}' or 'globe.adsbexchange.com')")
     parser.add_argument("--api-key", type=str, default=None, help="API authentication key (e.g. for ADS-B Exchange RapidAPI/Gateway)")
     parser.add_argument("--orion-host", type=str, default="127.0.0.1", help="Orion server IP or hostname")
-    parser.add_argument("--orion-port", type=int, default=8745, help="Orion server TCP port")
+    parser.add_argument("--orion-port", type=int, default=8745, help="Orion server UDP port (default: 8745)")
     parser.add_argument("--rate", type=float, default=2.0, help="Coordinate transmission rate in Hz")
     parser.add_argument("--tilt", type=float, default=45.0, help="Camera/gimbal tilt angle in degrees (default: 45.0)")
     parser.add_argument("--mock", action="store_true", help="Force mock ADS-B traffic generator for offline testing")

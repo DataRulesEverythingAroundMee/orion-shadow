@@ -7,6 +7,16 @@ from dataclasses import dataclass
 TARGET_SDK_VERSION = "3.1.9"
 PROTOCOL_VERSION = "1.4.0"
 
+# Default ports (from OrionComm.h)
+UDP_OUT_PORT = 8745   # For sending discovery broadcasts
+UDP_IN_PORT = 8746    # For receiving discovery responses
+TCP_PORT = 8747       # For persistent TCP communication
+
+# Legacy aliases
+DEFAULT_UDP_PORT = UDP_OUT_PORT
+DEFAULT_TCP_PORT = TCP_PORT
+DISCOVERY_PORT = UDP_OUT_PORT
+
 ORION_SYNC0 = 0xD0
 ORION_SYNC1 = 0x0D
 

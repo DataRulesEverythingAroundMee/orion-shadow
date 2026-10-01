@@ -64,6 +64,11 @@ class GimbalState:
                 pan, tilt = struct.unpack(">ff", packet.data[:8])
                 self.target_pan = max(min(pan, self.pan_limit), -self.pan_limit)
                 self.target_tilt = max(min(tilt, self.tilt_limit), -self.tilt_limit)
+            elif len(packet.data) >= 4:
+                pan_raw, tilt_raw = struct.unpack(">hh", packet.data[:4])
+                pan, tilt = pan_raw / 1000.0, tilt_raw / 1000.0
+                self.target_pan = max(min(pan, self.pan_limit), -self.pan_limit)
+                self.target_tilt = max(min(tilt, self.tilt_limit), -self.tilt_limit)
         
         elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
             if len(packet.data) >= 1:

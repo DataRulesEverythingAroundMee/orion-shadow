@@ -9,7 +9,10 @@ OrionShadow is a digital twin of the Trillium Engineering Orion gimbal. It provi
 ### Key Simulation Parameters
 - **Target SDK**: `Orion SDK` (v3.1.9)
 - **Protocol**: `OrionPublic` (v1.4.0)
-- **Communication**: UDP (simulated Ethernet/Serial)
+- **Communication Ports**:
+  - `UDP_OUT_PORT`: `8745` (discovery broadcasts and datagram commands)
+  - `UDP_IN_PORT`: `8746` (discovery responses sent to SDK clients)
+  - `TCP_PORT`: `8747` (persistent TCP communication)
 - **Physics Integration**: $dt$-based (default 0.1s)
 - **Endianness**: Big-endian (Network Byte Order)
 
@@ -82,7 +85,7 @@ The simulator uses a basic Euler integration approach for each axis (Pan/Tilt):
 
 ## 📝 Integration Checklist
 
-- [ ] Ensure the connection is established via UDP.
+- [ ] Ensure connection is established via TCP (`port 8747`) for persistent sessions or UDP (`port 8745`) for datagrams.
 - [ ] Send an `ORION_PKT_INITIALIZE` (0x00) packet immediately after connection.
 - [ ] Verify that the client is using **Big-endian** byte order.
 - [ ] Confirm the Fletcher-251 checksum is applied to every outgoing packet.

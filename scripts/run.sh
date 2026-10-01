@@ -8,9 +8,11 @@ set -e
 # Ensure we are in the project root
 cd "$(dirname "$0")/../src"
 
-# Default values
+# Default values (matching Orion SDK OrionComm.h)
 HOST="0.0.0.0"
 PORT="8745"
+UDP_IN_PORT="8746"
+TCP_PORT="8747"
 DT="0.1"
 DTED_PATH=""
 TILE_URL=""
@@ -19,7 +21,9 @@ TILE_URL=""
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --host) HOST="$2"; shift ;;
-        --port) PORT="$2"; shift ;;
+        --port|--udp-port) PORT="$2"; shift ;;
+        --udp-in-port) UDP_IN_PORT="$2"; shift ;;
+        --tcp-port) TCP_PORT="$2"; shift ;;
         --dt) DT="$2"; shift ;;
         --dted-path) DTED_PATH="$2"; shift ;;
         --tile-url) TILE_URL="$2"; shift ;;
@@ -29,7 +33,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Construct command
-CMD="python3 -m orion_shadow.server --host $HOST --port $PORT --dt $DT"
+CMD="python3 -m orion_shadow.server --host $HOST --port $PORT --udp-in-port $UDP_IN_PORT --tcp-port $TCP_PORT --dt $DT"
 
 if [ -n "$DTED_PATH" ]; then
     CMD="$CMD --dted-path \"$DTED_PATH\""

@@ -3,6 +3,7 @@ import argparse
 import struct
 from typing import List, Optional, Set, Tuple
 from orion_shadow.core.engine import ProtocolEngine
+from orion_shadow.core.protocol import UDP_OUT_PORT, UDP_IN_PORT, TCP_PORT
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.video_server import VideoServer
@@ -28,17 +29,24 @@ class OrionUDPProtocol(asyncio.DatagramProtocol):
 
 
 class OrionServer:
-    def __init__(self, host='0.0.0.0', port=8745, dt=0.1, dted_path: Optional[str] = None, 
+    def __init__(self, host: str = '0.0.0.0', port: int = UDP_OUT_PORT, 
+                 udp_in_port: int = UDP_IN_PORT, tcp_port: Optional[int] = TCP_PORT,
+                 dt: float = 0.1, dted_path: Optional[str] = None, 
                  tile_url: Optional[str] = None, video_port: int = 5004,
                  multicast_group: str = '239.255.0.1', video_enabled: bool = True):
         self.host = host
         self.port = port
+        self.udp_port = port
+        self.udp_in_port = udp_in_port
+        self.tcp_port = tcp_port
         self.dt = dt
         self.terrain = TerrainEngine(dted_path)
         self.state = GimbalState(dt, self.terrain)
         self.engine = ProtocolEngine()
-        self.clients: Set[Tuple[str, int]] = set()
+        self.clients: Set[Tuple[str, int]] = set()  # UDP clients
+        self.tcp_clients: Set[asyncio.StreamWriter] = set()  # TCP clients
         self.transport: Optional[asyncio.DatagramTransport] = None
+        self.tcp_server: Optional[asyncio.AbstractServer] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self._tasks: List[asyncio.Task] = []
         self._running: bool = False
@@ -56,7 +64,7 @@ class OrionServer:
 
     def handle_datagram(self, data: bytes, addr: Tuple[str, int]):
         if addr not in self.clients:
-            print("Got connection")
+            print("Got datagram")
             print(f"[*] New connection from {addr}")
             self.clients.add(addr)
         
@@ -70,11 +78,20 @@ class OrionServer:
                     full_packet = data[offset:offset + pkt_len]
                     try:
                         packet = self.engine.parse(full_packet)
+                        response_pkt = None
                         if packet:
-                            self.state.update_from_command(packet)
+                            response_pkt = self.state.update_from_command(packet)
+                        
+                        echo_data = response_pkt if response_pkt else full_packet
                         # Echo behavior
                         if self.transport and not self.transport.is_closing():
-                            self.transport.sendto(full_packet, addr)
+                            self.transport.sendto(echo_data, addr)
+                            # Also respond on UDP_IN_PORT (8746) if different, for clients expecting discovery reply on UDP_IN_PORT
+                            if self.udp_in_port and addr[1] != self.udp_in_port:
+                                try:
+                                    self.transport.sendto(echo_data, (addr[0], self.udp_in_port))
+                                except Exception:
+                                    pass
                     except Exception as e:
                         print(f"[!] Error with {addr}: {e}")
                     offset += pkt_len
@@ -83,9 +100,56 @@ class OrionServer:
             else:
                 offset += 1
 
+    async def handle_tcp_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        addr = writer.get_extra_info('peername')
+        print(f"[*] New TCP connection from {addr}")
+        self.tcp_clients.add(writer)
+        buffer = bytearray()
+        try:
+            while self._running:
+                chunk = await reader.read(1024)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                while len(buffer) >= 6:
+                    if buffer[0] == 0xD0 and buffer[1] == 0x0D:
+                        p_id = buffer[2]
+                        length = buffer[3]
+                        pkt_len = 4 + length + 2
+                        if len(buffer) >= pkt_len:
+                            full_packet = bytes(buffer[:pkt_len])
+                            del buffer[:pkt_len]
+                            try:
+                                packet = self.engine.parse(full_packet)
+                                response_pkt = None
+                                if packet:
+                                    response_pkt = self.state.update_from_command(packet)
+                                echo_data = response_pkt if response_pkt else full_packet
+                                writer.write(echo_data)
+                                await writer.drain()
+                            except Exception as e:
+                                print(f"[!] Error processing TCP packet from {addr}: {e}")
+                        else:
+                            break
+                    else:
+                        del buffer[0]
+        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
+            pass
+        except Exception as e:
+            print(f"[!] TCP client {addr} error: {e}")
+        finally:
+            print(f"[-] Closing TCP connection {addr}")
+            if writer in self.tcp_clients:
+                self.tcp_clients.remove(writer)
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Deprecated TCP handler kept for backwards compatibility."""
-        pass
+        """TCP handler delegate."""
+        await self.handle_tcp_client(reader, writer)
 
     async def simulation_loop(self):
         """The 'Heartbeat' of the simulator: physics and telemetry."""
@@ -98,19 +162,20 @@ class OrionServer:
             self.state.step()
             
             # 2. Broadcast Telemetry to all clients
-            if self.clients and self.transport and not self.transport.is_closing():
-                packets = [
-                    self.state.get_telemetry_packet(),
-                    self.state.get_laser_state_packet(),
-                    self.state.get_camera_state_packet(),
-                    self.state.get_sensor_data_packet(),
-                    self.state.get_diagnostics_packet(),
-                    self.state.get_video_options_packet(),
-                    self.state.get_tracking_options_packet(),
-                    self.state.get_cameras_packet(),
-                    self.state.get_faults_packet(),
-                ]
+            packets = [
+                self.state.get_telemetry_packet(),
+                self.state.get_laser_state_packet(),
+                self.state.get_camera_state_packet(),
+                self.state.get_sensor_data_packet(),
+                self.state.get_diagnostics_packet(),
+                self.state.get_video_options_packet(),
+                self.state.get_tracking_options_packet(),
+                self.state.get_cameras_packet(),
+                self.state.get_faults_packet(),
+            ]
                         
+            # Broadcast to UDP clients
+            if self.clients and self.transport and not self.transport.is_closing():
                 for addr in list(self.clients):
                     if not self._running or not self.transport or self.transport.is_closing():
                         break
@@ -118,18 +183,43 @@ class OrionServer:
                         for p in packets:
                             self.transport.sendto(p, addr)
                     except Exception as e:
-                        print(f"[!] Error sending telemetry to {addr}: {e}")
+                        print(f"[!] Error sending UDP telemetry to {addr}: {e}")
                         if addr in self.clients:
                             self.clients.remove(addr)
 
+            # Broadcast to TCP clients
+            if self.tcp_clients:
+                for writer in list(self.tcp_clients):
+                    if not self._running:
+                        break
+                    try:
+                        for p in packets:
+                            writer.write(p)
+                        await writer.drain()
+                    except Exception:
+                        if writer in self.tcp_clients:
+                            self.tcp_clients.remove(writer)
+
     def close(self):
         self._running = False
+        if self.tcp_server:
+            try:
+                self.tcp_server.close()
+            except Exception:
+                pass
+            self.tcp_server = None
         if self.transport:
             try:
                 self.transport.close()
             except Exception:
                 pass
             self.transport = None
+        for writer in list(self.tcp_clients):
+            try:
+                writer.close()
+            except Exception:
+                pass
+        self.tcp_clients.clear()
         if self.loop and self.loop.is_running():
             for t in list(self._tasks):
                 self.loop.call_soon_threadsafe(t.cancel)
@@ -140,19 +230,35 @@ class OrionServer:
         try:
             transport, protocol = await self.loop.create_datagram_endpoint(
                 lambda: OrionUDPProtocol(self),
-                local_addr=(self.host, self.port),
+                local_addr=(self.host, self.udp_port),
                 reuse_port=True
             )
         except (TypeError, OSError):
             transport, protocol = await self.loop.create_datagram_endpoint(
                 lambda: OrionUDPProtocol(self),
-                local_addr=(self.host, self.port)
+                local_addr=(self.host, self.udp_port)
             )
         self.transport = transport
-        print(f"[+] Orion Simulator (Enhanced) active on {self.host}:{self.port}")
+        print(f"[+] Orion UDP Server active on {self.host}:{self.udp_port} (responses to {self.udp_in_port})")
+
+        if self.tcp_port is not None:
+            try:
+                self.tcp_server = await asyncio.start_server(
+                    self.handle_tcp_client,
+                    self.host,
+                    self.tcp_port,
+                    reuse_address=True
+                )
+                print(f"[+] Orion TCP Server active on {self.host}:{self.tcp_port}")
+            except Exception as e:
+                print(f"[!] Warning: Could not bind TCP server to {self.host}:{self.tcp_port}: {e}")
+
         print(f"[+] Physics Rate: {1/self.dt:.1f}Hz | Telemetry Rate: {1/self.dt:.1f}Hz")
         
         self._tasks = [asyncio.create_task(self.simulation_loop())]
+
+        if self.tcp_server:
+            self._tasks.append(asyncio.create_task(self.tcp_server.serve_forever()))
         
         if self.video_server:
             print(f"[+] Video Stream (Multicast) active on udp://@{self.video_server.multicast_group}:{self.video_server.port}")
@@ -167,15 +273,27 @@ class OrionServer:
             for t in self._tasks:
                 if not t.done():
                     t.cancel()
+            if self.tcp_server:
+                self.tcp_server.close()
+                await self.tcp_server.wait_closed()
+                self.tcp_server = None
+            for writer in list(self.tcp_clients):
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+            self.tcp_clients.clear()
             if self.transport:
                 self.transport.close()
                 self.transport = None
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8745)
-    parser.add_argument("--dt", type=float, default=0.1)
+    parser = argparse.ArgumentParser(description="OrionShadow SIL/HIL Gimbal Simulator")
+    parser.add_argument("--host", default="0.0.0.0", help="Interface to bind to (default: 0.0.0.0)")
+    parser.add_argument("--port", "--udp-port", type=int, default=UDP_OUT_PORT, dest="port", help=f"UDP port for commands/discovery (default: {UDP_OUT_PORT})")
+    parser.add_argument("--udp-in-port", type=int, default=UDP_IN_PORT, help=f"UDP port for discovery responses (default: {UDP_IN_PORT})")
+    parser.add_argument("--tcp-port", type=int, default=TCP_PORT, help=f"TCP port for persistent communication (default: {TCP_PORT})")
+    parser.add_argument("--dt", type=float, default=0.1, help="Physics/telemetry update interval in seconds (default: 0.1)")
     parser.add_argument("--dted-path", type=str, default=None, help="Path to DTED folder or file for terrain simulation")
     parser.add_argument("--tile-url", type=str, default=None, help="XYZ tile URL template (e.g. 'https://{z}/{x}/{y}.png')")
     parser.add_argument("--multicast-group", type=str, default="239.255.0.1", help="Multicast IP address for video stream (default: 239.255.0.1)")
@@ -186,6 +304,8 @@ if __name__ == "__main__":
     server = OrionServer(
         host=args.host, 
         port=args.port, 
+        udp_in_port=args.udp_in_port,
+        tcp_port=args.tcp_port,
         dt=args.dt, 
         dted_path=args.dted_path,
         tile_url=args.tile_url,

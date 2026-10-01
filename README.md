@@ -49,9 +49,11 @@ Simulates the internal logic of the Orion Crown board.
 • **Telemetry**: Tracks the "current" physical position of the gimbal, which is updated based on physics integration.
 
 ### 5. Communication Layer (`orion_shadow.server`)
-An asynchronous UDP server that maintains communication with multiple SDK clients.
-• **Concurrency**: Uses `asyncio` DatagramProtocol to handle multiple clients simultaneously.
-• **Multiplexing**: Broadcasts telemetry updates to all registered clients to mimic real hardware behavior.
+An asynchronous dual UDP and TCP server adhering to the standard ports defined in Orion SDK (`OrionComm.h`):
+• **`UDP_OUT_PORT` (8745)**: Listens for incoming discovery broadcasts and datagram commands.
+• **`UDP_IN_PORT` (8746)**: Destination port for discovery responses sent back to SDK clients.
+• **`TCP_PORT` (8747)**: Persistent TCP server for command streams and bidirectional telemetry.
+• **Concurrency & Multiplexing**: Broadcasts periodic telemetry updates across all connected UDP and TCP clients.
 
 ### 6. Telemetry Engine (`orion_shadow.telemetry`)
 A periodic task that generates and pushes state packets.
@@ -94,35 +96,41 @@ pip install -e .
 ```
 
 ### 3. Running the Simulator
-Start the simulator as a UDP server. You can adjust the physics timestep (`--dt`) to increase or decrease simulation fidelity.
+Start the simulator. It binds to the standard Orion SDK ports (`8745` UDP, `8747` TCP). You can adjust the physics timestep (`--dt`) to increase or decrease simulation fidelity.
 
 To enable terrain-aware simulation, provide the path to your DTED data using the `--dted-path` flag.
 
 ```bash
-# Standard mode (10Hz)
-python -m orion_shadow.server --host 0.0.0.0 --port 5000
+# Standard mode (10Hz) on default ports (UDP 8745, TCP 8747)
+python -m orion_shadow.server --host 0.0.0.0
 
 # High-fidelity mode (100Hz)
-python -m orion_shadow.server --host 0.0.0.0 --port 5000 --dt 0.01
+python -m orion_shadow.server --host 0.0.0.0 --dt 0.01
 
 # Terrain-aware mode
-python -m orion_shadow.server --host 0.0.0.0 --port 5000 --dted-path /path/to/dted/folder
+python -m orion_shadow.server --host 0.0.0.0 --dted-path /path/to/dted/folder
 ```
 
 **Command Line Options:**
 • `--host`: Interface to bind to (default: `0.0.0.0`).
-• `--port`: Port to listen on (default: `5000`).
+• `--port` / `--udp-port`: UDP port for discovery and commands (default: `8745`).
+• `--udp-in-port`: UDP port for discovery responses (default: `8746`).
+• `--tcp-port`: TCP port for persistent communication (default: `8747`).
 • `--dt`: Physics/Telemetry update interval in seconds (default: `0.1`).
 • `--dted-path`: Path to DTED folder for terrain simulation (optional).
 
 ### 4. Integrating Your Software
-To use the simulator with your existing Orion SDK software, simply change your connection settings to point to the simulator's IP.
+To use the simulator with your existing Orion SDK software, simply connect to the simulator's IP on the standard ports.
 
-**Before (Physical Hardware):**
-`gimbal_client.connect(ip="192.168.1.100", port=5000)`
+**TCP Connection (SDK default persistent connection):**
+```python
+gimbal_client.connect(ip="localhost", port=8747)
+```
 
-**After (Simulator):**
-`gimbal_client.connect(ip="localhost", port=5000)`
+**UDP Connection (Discovery / Datagram):**
+```python
+gimbal_client.connect(ip="localhost", port=8745)
+```
 
 ---
 
