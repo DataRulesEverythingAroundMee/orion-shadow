@@ -88,6 +88,7 @@ class GimbalState:
         self.gps_lat = 0.0
         self.gps_lon = 0.0
         self.gps_alt = 0.0
+        self.terrain_alt = 0.0
         self.aircraft_heading = 0.0
         self.aircraft_roll = 0.0
         self.aircraft_pitch = 0.0
@@ -254,7 +255,9 @@ class GimbalState:
         self.faults.apply_faults(self)
         if self.terrain and self.terrain.enabled:
             terrain_alt = self.terrain.get_elevation(self.gps_lat, self.gps_lon)
-            self.gps_alt = terrain_alt
+            self.terrain_alt = terrain_alt
+            if self.gps_alt == 0.0:
+                self.gps_alt = terrain_alt
         self.uptime += self.dt
 
     def get_telemetry_packet(self) -> bytes:

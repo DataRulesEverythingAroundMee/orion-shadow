@@ -16,6 +16,9 @@ TCP_PORT="8747"
 DT="0.1"
 DTED_PATH=""
 TILE_URL=""
+TILE_URL="https://mt0.google.com/vt/lyrs=m&x={x}&y={y}&z={z}" # Road map
+TILE_URL="https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}" # Satellite
+TILE_URL="https://mt0.google.com/vt/lyrs=y&x={x}&y={y}&z={z}" # Satellite + Labels
 FPS=""
 TILE_ZOOM=""
 MAX_TILE_ZOOM=""
