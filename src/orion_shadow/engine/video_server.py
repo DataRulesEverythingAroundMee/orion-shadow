@@ -6,7 +6,7 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Optional, List, Tuple, Any, Dict
+from typing import Optional, List, Tuple, Any, Dict, Set
 
 # Ensure local site-packages is in sys.path if present
 for extra_path in ['/home/user/.local/lib/python3.9/site-packages', os.path.expanduser('~/.local/lib/python3.9/site-packages')]:
@@ -48,13 +48,17 @@ class VideoServer:
         multicast_group: str = '239.255.0.1',
         port: int = 5004,
         host: str = '0.0.0.0',
-        fps: int = 10,
+        fps: int = 24,
         width: int = 640,
-        height: int = 480
+        height: int = 480,
+        max_tile_zoom: int = 17,
+        tile_zoom: Optional[int] = None
     ):
         self.state = state
         self.tile_url_template = tile_url_template
-        self.visualizer = TileVisualizer(tile_url_template) if tile_url_template else None
+        self.max_tile_zoom = max_tile_zoom
+        self.fixed_tile_zoom = tile_zoom
+        self.visualizer = TileVisualizer(tile_url_template, zoom_max=max(20, max_tile_zoom)) if tile_url_template else None
         self.multicast_group = multicast_group
         self.port = port
         self.host = host
@@ -68,6 +72,24 @@ class VideoServer:
         self.sock: Optional[socket.socket] = None
         self.has_ffmpeg = shutil.which("ffmpeg") is not None
         self.tile_cache: Dict[Tuple[int, int, int], Any] = {}
+        self._pending_tile_fetches: Set[Tuple[int, int, int]] = set()
+        self._fetch_semaphore: Optional[asyncio.Semaphore] = None
+
+        # Pre-allocated output frame buffer (avoids allocation every frame)
+        self._frame_buf: Optional[Any] = None
+
+        # Composite cache: avoids re-stitching and re-warping when the
+        # camera hasn't moved enough to change the visible tile set
+        self._cached_tile_keys: Optional[frozenset] = None
+        self._cached_ground: Optional[Any] = None
+        self._cached_tile_px: int = 0
+        self._cached_tile_bounds: Optional[Tuple[int, int, int, int]] = None
+        self._cached_warp_matrix: Optional[Any] = None
+        self._cached_corners_frac: Optional[List[Tuple[float, float]]] = None
+        self._cached_warped_frame: Optional[Any] = None
+
+        # Resized-tile cache: avoids cv2.resize on every tile every frame
+        self._resized_cache: Dict[Tuple[Tuple[int, int, int], int], Any] = {}
 
     def _detect_local_ip(self) -> str:
         """Determines best local IP for multicast interface routing."""
@@ -82,29 +104,43 @@ class VideoServer:
         except Exception:
             return "127.0.0.1"
 
-    async def _fetch_tile(self, z: int, x: int, y: int) -> Optional[Any]:
-        """Fetches a single tile from the XYZ tile server with caching."""
+    async def _fetch_tile_worker(self, z: int, x: int, y: int):
+        """Asynchronously fetches and decodes a tile in the background without blocking video rendering."""
         if self.session is None or self.visualizer is None or cv2 is None or np is None:
-            return None
+            return
+        cache_key = (z, x, y)
+        if cache_key in self.tile_cache:
+            self._pending_tile_fetches.discard(cache_key)
+            return
+
+        if self._fetch_semaphore is None:
+            self._fetch_semaphore = asyncio.Semaphore(16)
+
+        url = self.visualizer.tile_url_template.format(z=z, x=x, y=y)
+        try:
+            async with self._fetch_semaphore:
+                headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) OrionShadow/1.0"}
+                async with self.session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as response:
+                    if response.status == 200:
+                        content = await response.read()
+                        nparr = np.frombuffer(content, np.uint8)
+                        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if img is not None:
+                            if len(self.tile_cache) > 2048:
+                                self.tile_cache.pop(next(iter(self.tile_cache)))
+                            self.tile_cache[cache_key] = img
+        except Exception:
+            pass
+        finally:
+            self._pending_tile_fetches.discard(cache_key)
+
+    async def _fetch_tile(self, z: int, x: int, y: int) -> Optional[Any]:
+        """Fetches a single tile with caching (legacy / direct fetch helper)."""
         cache_key = (z, x, y)
         if cache_key in self.tile_cache:
             return self.tile_cache[cache_key]
-        url = self.visualizer.tile_url_template.format(z=z, x=x, y=y)
-        try:
-            headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) OrionShadow/1.0"}
-            async with self.session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=2)) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    nparr = np.frombuffer(content, np.uint8)
-                    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if img is not None:
-                        if len(self.tile_cache) > 1024:
-                            self.tile_cache.pop(next(iter(self.tile_cache)))
-                        self.tile_cache[cache_key] = img
-                        return img
-        except Exception:
-            pass
-        return None
+        await self._fetch_tile_worker(z, x, y)
+        return self.tile_cache.get(cache_key)
 
     def _get_telemetry(self) -> Dict[str, Any]:
         """Extracts current gimbal, aircraft, and sensor telemetry."""
@@ -166,6 +202,9 @@ class VideoServer:
         Higher camera zoom (narrower FOV) or lower altitude produces a higher
         tile zoom level, yielding sharper satellite/map imagery.
         """
+        if self.fixed_tile_zoom is not None:
+            return self.fixed_tile_zoom
+
         # Depression angle at boresight (degrees below horizontal)
         depression = max(5.0, -cam_pitch)
         boresight_dist = alt / math.tan(math.radians(depression))
@@ -180,10 +219,10 @@ class VideoServer:
         cos_lat = math.cos(math.radians(lat))
         if output_gsd > 0:
             z = math.log2(EARTH_CIRCUMFERENCE * cos_lat / (256.0 * output_gsd))
-            z = int(math.ceil(z))
+            z = int(round(z))
         else:
-            z = 17
-        return max(15, min(17, z))
+            z = self.max_tile_zoom
+        return max(14, min(self.max_tile_zoom, z))
 
     def _generate_synthetic_background(self) -> Any:
         """
@@ -410,7 +449,7 @@ class VideoServer:
             # Adaptive zoom: pick tile zoom level matching the camera's GSD
             zoom = self._compute_tile_zoom(
                 telem['lat'], max(10.0, alt), telem['cam_pitch'], hfov
-            ) if alt >= 10.0 else 17
+            ) if alt >= 10.0 else (self.fixed_tile_zoom or min(17, self.max_tile_zoom))
 
             # Use perspective footprint when altitude is sufficient
             footprint = None
@@ -431,63 +470,106 @@ class VideoServer:
                     telem['pan'], telem['tilt'], zoom
                 )
 
+            # Retrieve cached tiles immediately without blocking the rendering loop
             tile_results = {}
-            if tiles_to_fetch and self.session is not None:
-                fetch_tasks = {(z, x, y): self._fetch_tile(z, x, y)
-                               for z, x, y in tiles_to_fetch}
-                fetched = await asyncio.gather(*fetch_tasks.values())
-                for key, img in zip(fetch_tasks.keys(), fetched):
-                    tile_results[key] = img
+            missing_tiles = []
+            for t in tiles_to_fetch:
+                img = self.tile_cache.get(t)
+                if img is not None:
+                    tile_results[t] = img
+                elif t not in self._pending_tile_fetches:
+                    missing_tiles.append(t)
+
+            # Trigger background asynchronous fetch for missing tiles
+            if missing_tiles and self.session is not None and not self.session.closed:
+                for key in missing_tiles[:32]:
+                    self._pending_tile_fetches.add(key)
+                    asyncio.create_task(self._fetch_tile_worker(*key))
 
             has_valid_tiles = any(img is not None for img in tile_results.values())
             if has_valid_tiles and footprint:
-                # --- Perspective-correct tile compositing ---
+                # --- Perspective-correct tile compositing (cached & bounded) ---
                 min_tx, min_ty, max_tx, max_ty = footprint['tile_bounds']
                 n_cols = max_tx - min_tx + 1
                 n_rows = max_ty - min_ty + 1
 
-                # Tile render size — keep the ground-plane image high-res
-                # to avoid blurry output after the perspective warp
-                total_tiles = n_cols * n_rows
-                if total_tiles > 200:
-                    tile_px = 128
-                elif total_tiles > 64:
-                    tile_px = 192
-                else:
-                    tile_px = 256
+                # Dynamically size tile_px so the ground canvas stays under 1280px.
+                # This guarantees cv2.warpPerspective finishes in ~1-2ms at high FPS.
+                max_dim = max(n_cols, n_rows)
+                target_canvas_dim = 1280
+                tile_px = max(32, min(256, int(target_canvas_dim / max(1, max_dim))))
 
-                # Stitch tiles into a ground-plane image
-                ground = np.zeros((n_rows * tile_px, n_cols * tile_px, 3),
-                                  dtype=np.uint8)
-                for (z, tx, ty), img in tile_results.items():
-                    if img is not None:
-                        col = tx - min_tx
-                        row = ty - min_ty
-                        if 0 <= col < n_cols and 0 <= row < n_rows:
-                            resized = cv2.resize(img, (tile_px, tile_px))
-                            ground[row * tile_px:(row + 1) * tile_px,
-                                   col * tile_px:(col + 1) * tile_px] = resized
-
-                # Perspective warp: ground-plane → camera image
-                # Source points are where each FOV corner intersects the
-                # ground-plane image (fractional tile coords → pixel coords)
+                # Check if tile set changed since last frame
+                current_tile_keys = frozenset(
+                    k for k, v in tile_results.items() if v is not None
+                )
                 corners_frac = footprint['corners_tile_frac']
-                src_pts = np.float32([
-                    [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
-                    for c in corners_frac
-                ])
-                dst_pts = np.float32([
-                    [0,              0],               # Top-left
-                    [self.width - 1, 0],               # Top-right
-                    [0,              self.height - 1],  # Bottom-left
-                    [self.width - 1, self.height - 1],  # Bottom-right
-                ])
+                tile_bounds = footprint['tile_bounds']
 
-                M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-                frame = cv2.warpPerspective(ground, M,
-                                            (self.width, self.height),
-                                            borderMode=cv2.BORDER_CONSTANT,
-                                            borderValue=(0, 0, 0))
+                tiles_changed = (current_tile_keys != self._cached_tile_keys
+                                 or tile_bounds != self._cached_tile_bounds
+                                 or tile_px != self._cached_tile_px)
+                corners_changed = (corners_frac != self._cached_corners_frac)
+
+                # Rebuild ground image only when tile set changes
+                if tiles_changed:
+                    ground = np.zeros((n_rows * tile_px, n_cols * tile_px, 3),
+                                      dtype=np.uint8)
+                    for (z, tx, ty), img in tile_results.items():
+                        if img is not None:
+                            col = tx - min_tx
+                            row = ty - min_ty
+                            if 0 <= col < n_cols and 0 <= row < n_rows:
+                                # Cache resized tiles to avoid redundant resize
+                                rk = ((z, tx, ty), tile_px)
+                                if rk not in self._resized_cache:
+                                    self._resized_cache[rk] = cv2.resize(
+                                        img, (tile_px, tile_px),
+                                        interpolation=cv2.INTER_LINEAR)
+                                    # Evict old resized entries
+                                    if len(self._resized_cache) > 2048:
+                                        oldest = next(iter(self._resized_cache))
+                                        del self._resized_cache[oldest]
+                                ground[row * tile_px:(row + 1) * tile_px,
+                                       col * tile_px:(col + 1) * tile_px] = \
+                                    self._resized_cache[rk]
+
+                    self._cached_ground = ground
+                    self._cached_tile_keys = current_tile_keys
+                    self._cached_tile_px = tile_px
+                    self._cached_tile_bounds = tile_bounds
+
+                # Recompute perspective matrix only when footprint corners change
+                if tiles_changed or corners_changed:
+                    src_pts = np.float32([
+                        [(c[0] - min_tx) * tile_px, (c[1] - min_ty) * tile_px]
+                        for c in corners_frac
+                    ])
+                    dst_pts = np.float32([
+                        [0,              0],
+                        [self.width - 1, 0],
+                        [0,              self.height - 1],
+                        [self.width - 1, self.height - 1],
+                    ])
+                    self._cached_warp_matrix = cv2.getPerspectiveTransform(
+                        src_pts, dst_pts)
+                    self._cached_corners_frac = corners_frac
+
+                    # Warp into pre-allocated buffer
+                    if (self._frame_buf is None
+                            or self._frame_buf.shape != (self.height, self.width, 3)):
+                        self._frame_buf = np.empty(
+                            (self.height, self.width, 3), dtype=np.uint8)
+                    cv2.warpPerspective(self._cached_ground,
+                                        self._cached_warp_matrix,
+                                        (self.width, self.height),
+                                        dst=self._frame_buf,
+                                        borderMode=cv2.BORDER_CONSTANT,
+                                        borderValue=(0, 0, 0))
+                    self._cached_warped_frame = self._frame_buf.copy()
+
+                # Apply HUD on a copy of the cached warp (HUD updates every frame)
+                frame = self._cached_warped_frame.copy()
                 self.current_frame = self._draw_hud(frame)
                 return
 
@@ -588,10 +670,10 @@ class VideoServer:
                 pass
 
         frame_interval = 1.0 / self.fps
+        next_frame_time = time.perf_counter()
 
         try:
             while True:
-                start_time = asyncio.get_event_loop().time()
                 await self._update_frame()
 
                 if self.current_frame is not None:
@@ -619,8 +701,16 @@ class VideoServer:
                             except Exception:
                                 pass
 
-                elapsed = asyncio.get_event_loop().time() - start_time
-                await asyncio.sleep(max(0.005, frame_interval - elapsed))
+                # Precise frame timing with monotonic clock
+                next_frame_time += frame_interval
+                now = time.perf_counter()
+                sleep_duration = next_frame_time - now
+                if sleep_duration > 0:
+                    await asyncio.sleep(sleep_duration)
+                else:
+                    if sleep_duration < -frame_interval:
+                        next_frame_time = now
+                    await asyncio.sleep(0.001)
 
         finally:
             if self.proc:

@@ -183,8 +183,8 @@ def test_adaptive_zoom_increases_with_camera_zoom():
 
     assert z_narrow > z_wide, \
         f"Narrow FOV zoom ({z_narrow}) should be higher than wide FOV zoom ({z_wide})"
-    assert z_wide >= 15, f"Minimum zoom should be 15, got {z_wide}"
-    assert z_narrow <= 19, f"Maximum zoom should be 19, got {z_narrow}"
+    assert z_wide >= 14, f"Minimum zoom should be 14, got {z_wide}"
+    assert z_narrow <= 17, f"Maximum zoom should be 17, got {z_narrow}"
 
 
 if __name__ == '__main__':

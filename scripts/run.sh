@@ -16,6 +16,9 @@ TCP_PORT="8747"
 DT="0.1"
 DTED_PATH=""
 TILE_URL=""
+FPS=""
+TILE_ZOOM=""
+MAX_TILE_ZOOM=""
 
 LOGGER="INFO"
 
@@ -30,6 +33,9 @@ while [[ "$#" -gt 0 ]]; do
         --logger|--log-level) LOGGER="$2"; shift ;;
         --dted-path) DTED_PATH="$2"; shift ;;
         --tile-url) TILE_URL="$2"; shift ;;
+        --fps|--video-fps) FPS="$2"; shift ;;
+        --tile-zoom|--zoom) TILE_ZOOM="$2"; shift ;;
+        --max-tile-zoom) MAX_TILE_ZOOM="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
@@ -48,6 +54,18 @@ fi
 
 if [ -n "$TILE_URL" ]; then
     CMD="$CMD --tile-url \"$TILE_URL\""
+fi
+
+if [ -n "$FPS" ]; then
+    CMD="$CMD --fps \"$FPS\""
+fi
+
+if [ -n "$TILE_ZOOM" ]; then
+    CMD="$CMD --tile-zoom \"$TILE_ZOOM\""
+fi
+
+if [ -n "$MAX_TILE_ZOOM" ]; then
+    CMD="$CMD --max-tile-zoom \"$MAX_TILE_ZOOM\""
 fi
 
 echo "Starting OrionShadow Simulator..."

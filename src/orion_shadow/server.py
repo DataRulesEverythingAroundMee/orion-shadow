@@ -36,7 +36,8 @@ class OrionServer:
                  dt: float = 0.1, dted_path: Optional[str] = None, 
                  tile_url: Optional[str] = None, video_port: int = 5004,
                  multicast_group: str = '239.255.0.1', video_enabled: bool = True,
-                 log_level: str = 'warning'):
+                 log_level: str = 'warning', video_fps: int = 24,
+                 max_tile_zoom: int = 17, tile_zoom: Optional[int] = None):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -72,7 +73,10 @@ class OrionServer:
                 tile_url_template=tile_url, 
                 multicast_group=multicast_group,
                 port=video_port,
-                host=host
+                host=host,
+                fps=video_fps,
+                max_tile_zoom=max_tile_zoom,
+                tile_zoom=tile_zoom
             )
 
     def _format_packet_details(self, packet: OrionPacket) -> str:
@@ -392,6 +396,9 @@ if __name__ == "__main__":
     parser.add_argument("--tile-url", type=str, default=None, help="XYZ tile URL template (e.g. 'https://{z}/{x}/{y}.png')")
     parser.add_argument("--multicast-group", type=str, default="239.255.0.1", help="Multicast IP address for video stream (default: 239.255.0.1)")
     parser.add_argument("--video-port", type=int, default=5004, help="Multicast UDP port for video stream (default: 5004)")
+    parser.add_argument("--fps", "--video-fps", type=int, default=16, dest="fps", help="Video stream framerate in FPS (default: 16)")
+    parser.add_argument("--tile-zoom", "--zoom", type=int, default=None, dest="tile_zoom", help="Fixed XYZ tile zoom level (e.g. 14..19, default: adaptive)")
+    parser.add_argument("--max-tile-zoom", type=int, default=17, help="Maximum tile zoom level for adaptive resolution (default: 17)")
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
     parser.add_argument("--logger", "--log-level", default="warning", dest="log_level",
                         choices=["debug", "info", "warning", "error", "critical"],
@@ -410,7 +417,10 @@ if __name__ == "__main__":
         video_port=args.video_port,
         multicast_group=args.multicast_group,
         video_enabled=not args.no_video,
-        log_level=args.log_level
+        log_level=args.log_level,
+        video_fps=args.fps,
+        max_tile_zoom=args.max_tile_zoom,
+        tile_zoom=args.tile_zoom
     )
     try:
         asyncio.run(server.run())
