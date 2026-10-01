@@ -37,6 +37,7 @@ class OrionServer:
                  tile_url: Optional[str] = None, video_port: int = 5004,
                  multicast_group: str = '239.255.0.1', video_enabled: bool = True,
                  log_level: str = 'warning', video_fps: int = 24,
+                 video_width: int = 1280, video_height: int = 720,
                  max_tile_zoom: int = 17, tile_zoom: Optional[int] = None,
                  prefetch: bool = True, prefetch_distance: float = 3000.0):
         self.host = host
@@ -76,6 +77,8 @@ class OrionServer:
                 port=video_port,
                 host=host,
                 fps=video_fps,
+                width=video_width,
+                height=video_height,
                 max_tile_zoom=max_tile_zoom,
                 tile_zoom=tile_zoom,
                 prefetch_enabled=prefetch,
@@ -400,6 +403,8 @@ if __name__ == "__main__":
     parser.add_argument("--multicast-group", type=str, default="239.255.0.1", help="Multicast IP address for video stream (default: 239.255.0.1)")
     parser.add_argument("--video-port", type=int, default=5004, help="Multicast UDP port for video stream (default: 5004)")
     parser.add_argument("--fps", "--video-fps", type=int, default=24, dest="fps", help="Video stream framerate in FPS (default: 24)")
+    parser.add_argument("--video-width", type=int, default=1280, help="Video stream width in pixels (default: 1280, e.g. 1280 for 720p HD)")
+    parser.add_argument("--video-height", type=int, default=720, help="Video stream height in pixels (default: 720, e.g. 720 for 720p HD)")
     parser.add_argument("--tile-zoom", "--zoom", type=int, default=None, dest="tile_zoom", help="Fixed XYZ tile zoom level (e.g. 14..19, default: adaptive)")
     parser.add_argument("--max-tile-zoom", type=int, default=17, help="Maximum tile zoom level for adaptive resolution (default: 17)")
     parser.add_argument("--no-prefetch", action="store_false", dest="prefetch", help="Disable lookahead tile prefetching ahead of aircraft")
@@ -424,6 +429,8 @@ if __name__ == "__main__":
         video_enabled=not args.no_video,
         log_level=args.log_level,
         video_fps=args.fps,
+        video_width=args.video_width,
+        video_height=args.video_height,
         max_tile_zoom=args.max_tile_zoom,
         tile_zoom=args.tile_zoom,
         prefetch=args.prefetch,
