@@ -57,6 +57,44 @@ class DTEDTile:
         res = (1 - dr) * (1 - dc) * v00 + (1 - dr) * dc * v01 + dr * (1 - dc) * v10 + dr * dc * v11
         return float(res)
 
+    def get_elevations(self, lats: Any, lons: Any) -> Any:
+        """Batch elevation interpolation for arrays or lists of coordinates."""
+        if np is not None and isinstance(lats, np.ndarray):
+            lats_clamped = np.clip(lats, self.lat_min, self.lat_max)
+            lons_clamped = np.clip(lons, self.lon_min, self.lon_max)
+
+            lat_range = self.lat_max - self.lat_min
+            lon_range = self.lon_max - self.lon_min
+
+            row_frac = (lats_clamped - self.lat_min) / lat_range if lat_range != 0 else np.zeros_like(lats_clamped)
+            col_frac = (lons_clamped - self.lon_min) / lon_range if lon_range != 0 else np.zeros_like(lons_clamped)
+
+            row = row_frac * (self.rows - 1)
+            col = col_frac * (self.cols - 1)
+
+            r0 = np.floor(row).astype(np.int32)
+            c0 = np.floor(col).astype(np.int32)
+            r1 = np.minimum(r0 + 1, self.rows - 1)
+            c1 = np.minimum(c0 + 1, self.cols - 1)
+
+            dr = row - r0
+            dc = col - c0
+
+            if hasattr(self.grid, 'shape'):
+                grid = np.asarray(self.grid, dtype=np.float32)
+            else:
+                grid = np.array(self.grid, dtype=np.float32)
+
+            v00 = grid[r0, c0]
+            v01 = grid[r0, c1]
+            v10 = grid[r1, c0]
+            v11 = grid[r1, c1]
+
+            return (1.0 - dr) * (1.0 - dc) * v00 + (1.0 - dr) * dc * v01 + dr * (1.0 - dc) * v10 + dr * dc * v11
+        else:
+            return [self.get_elevation(float(la), float(lo)) for la, lo in zip(lats, lons)]
+
+
 
 class TerrainEngine:
     """Handles elevation queries from binary DTED data (.dt0, .dt1, .dt2).
@@ -70,6 +108,7 @@ class TerrainEngine:
         self.enabled = dted_path is not None
         self.dted_path = dted_path
         self.tiles: List[DTEDTile] = []
+        self.spatial_index: Dict[Tuple[int, int], DTEDTile] = {}
         
         # Backwards compatibility attributes
         self.rows = 0
@@ -214,6 +253,17 @@ class TerrainEngine:
         self.lon_min = min(t.lon_min for t in self.tiles)
         self.lon_max = max(t.lon_max for t in self.tiles)
 
+        # Build O(1) spatial index by integer 1x1 degree cells
+        self.spatial_index.clear()
+        for tile in self.tiles:
+            lat_start = int(math.floor(tile.lat_min))
+            lat_end = int(math.ceil(tile.lat_max))
+            lon_start = int(math.floor(tile.lon_min))
+            lon_end = int(math.ceil(tile.lon_max))
+            for la in range(lat_start, max(lat_start + 1, lat_end)):
+                for lo in range(lon_start, max(lon_start + 1, lon_end)):
+                    self.spatial_index[(la, lo)] = tile
+
         print(f"[*] Loaded {len(self.tiles)} DTED tile(s) from {self.dted_path} "
               f"(Lat: [{self.lat_min:.2f}, {self.lat_max:.2f}], Lon: [{self.lon_min:.2f}, {self.lon_max:.2f}])")
 
@@ -221,7 +271,13 @@ class TerrainEngine:
         if not self.enabled or not self.tiles:
             return 0.0
 
-        # Query the tile containing coordinates
+        # Fast O(1) spatial index lookup
+        cell_key = (int(math.floor(lat)), int(math.floor(lon)))
+        tile = self.spatial_index.get(cell_key)
+        if tile is not None and tile.contains(lat, lon):
+            return tile.get_elevation(lat, lon)
+
+        # Secondary search across tiles if coordinates are near boundary
         for tile in self.tiles:
             if tile.contains(lat, lon):
                 return tile.get_elevation(lat, lon)
@@ -235,3 +291,53 @@ class TerrainEngine:
             )
         )
         return closest_tile.get_elevation(lat, lon)
+
+    def get_elevations(self, lats: Any, lons: Any) -> Any:
+        """Batch elevation interpolation across loaded DTED tiles with O(1) spatial cell routing."""
+        if not self.enabled or not self.tiles:
+            if np is not None and isinstance(lats, np.ndarray):
+                return np.zeros_like(lats, dtype=np.float32)
+            return [0.0] * len(lats)
+
+        if len(self.tiles) == 1:
+            return self.tiles[0].get_elevations(lats, lons)
+
+        if np is not None and isinstance(lats, np.ndarray):
+            result = np.zeros_like(lats, dtype=np.float32)
+            assigned = np.zeros_like(lats, dtype=bool)
+
+            # Determine unique integer 1x1 deg cells present in the input coordinates
+            cell_lat = np.floor(lats).astype(np.int32)
+            cell_lon = np.floor(lons).astype(np.int32)
+            cell_ids = (cell_lat.astype(np.int64) << 32) | (cell_lon.astype(np.int64) & 0xFFFFFFFF)
+            unique_ids = np.unique(cell_ids)
+
+            for u_id in unique_ids:
+                la = int(u_id >> 32)
+                lo = int(np.int32(u_id & 0xFFFFFFFF))
+                tile = self.spatial_index.get((la, lo))
+                if tile is not None:
+                    mask = (cell_lat == la) & (cell_lon == lo)
+                    if np.any(mask):
+                        result[mask] = tile.get_elevations(lats[mask], lons[mask])
+                        assigned[mask] = True
+
+            unassigned = ~assigned
+            if np.any(unassigned):
+                for tile in self.tiles:
+                    mask = unassigned & (lats >= tile.lat_min) & (lats <= tile.lat_max) & (lons >= tile.lon_min) & (lons <= tile.lon_max)
+                    if np.any(mask):
+                        result[mask] = tile.get_elevations(lats[mask], lons[mask])
+                        assigned[mask] = True
+                        unassigned = ~assigned
+                        if not np.any(unassigned):
+                            break
+
+            if np.any(~assigned):
+                unassigned = ~assigned
+                result[unassigned] = self.tiles[0].get_elevations(lats[unassigned], lons[unassigned])
+            return result
+        else:
+            return [self.get_elevation(float(la), float(lo)) for la, lo in zip(lats, lons)]
+
+

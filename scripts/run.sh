@@ -50,6 +50,7 @@ while [[ "$#" -gt 0 ]]; do
         --max-tile-zoom) MAX_TILE_ZOOM="$2"; shift ;;
         --prefetch-distance) PREFETCH_DISTANCE="$2"; shift ;;
         --no-prefetch) NO_PREFETCH="1" ;;
+        --tile-cache-dir) TILE_CACHE_DIR="$2"; shift ;;
         --lat|--latitude) LAT="$2"; shift ;;
         --lon|--longitude) LON="$2"; shift ;;
         --alt|--altitude) ALT="$2"; shift ;;
@@ -91,6 +92,10 @@ fi
 
 if [ -n "$PREFETCH_DISTANCE" ]; then
     CMD="$CMD --prefetch-distance \"$PREFETCH_DISTANCE\""
+fi
+
+if [ -n "$TILE_CACHE_DIR" ]; then
+    CMD="$CMD --tile-cache-dir \"$TILE_CACHE_DIR\""
 fi
 
 if [ -n "$NO_PREFETCH" ]; then

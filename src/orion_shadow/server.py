@@ -42,7 +42,8 @@ class OrionServer:
                  prefetch: bool = True, prefetch_distance: float = 3000.0,
                  lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
                  pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0,
-                 speed: float = 0.0):
+                 speed: float = 0.0, tile_cache_dir: Optional[str] = "cache/tiles",
+                 gpu_encoding: Optional[bool] = None, drape_subsample: int = 6):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -93,6 +94,7 @@ class OrionServer:
             self.video_server = VideoServer(
                 self.state, 
                 tile_url_template=tile_url, 
+                terrain_engine=self.terrain,
                 multicast_group=multicast_group,
                 port=video_port,
                 host=host,
@@ -102,8 +104,12 @@ class OrionServer:
                 max_tile_zoom=max_tile_zoom,
                 tile_zoom=tile_zoom,
                 prefetch_enabled=prefetch,
-                prefetch_distance=prefetch_distance
+                prefetch_distance=prefetch_distance,
+                tile_cache_dir=tile_cache_dir,
+                gpu_encoding=gpu_encoding,
+                drape_subsample=drape_subsample
             )
+
 
     def _format_packet_details(self, packet: OrionPacket) -> str:
         pkt_name = self.engine.packet_id_map.get(packet.packet_id, f"PKT_0x{packet.packet_id:02X}")
@@ -443,6 +449,10 @@ class OrionServer:
             self._tasks.append(asyncio.create_task(self.tcp_server.serve_forever()))
         
         if self.video_server:
+            if self.video_server.is_3d_terrain_active:
+                print(f"[+] 3D Draped Terrain Visualization active (DTED + Map Tiles)")
+            elif self.video_server.visualizer:
+                print(f"[*] Flat 2D Map Visualization active (tile-url only)")
             print(f"[+] Video Stream (Multicast) active on udp://@{self.video_server.multicast_group}:{self.video_server.port}")
             self._tasks.append(asyncio.create_task(self.video_server.start()))
         
@@ -487,7 +497,7 @@ if __name__ == "__main__":
     parser.add_argument("--tile-zoom", "--zoom", type=int, default=None, dest="tile_zoom", help="Fixed XYZ tile zoom level (e.g. 14..19, default: adaptive)")
     parser.add_argument("--max-tile-zoom", type=int, default=17, help="Maximum tile zoom level for adaptive resolution (default: 17)")
     parser.add_argument("--no-prefetch", action="store_false", dest="prefetch", help="Disable lookahead tile prefetching ahead of aircraft")
-    parser.add_argument("--prefetch-distance", type=float, default=3000.0, help="Lookahead distance in meters for prefetching tiles ahead of aircraft (default: 3000.0m)")
+    parser.add_argument("--prefetch-distance", type=float, default=15000.0, help="Lookahead distance in meters for prefetching tiles ahead of aircraft (default: 3000.0m)")
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
     parser.add_argument("--lat", "--latitude", type=float, default=0.0, dest="lat", help="Initial camera/aircraft latitude in degrees (default: 0.0)")
     parser.add_argument("--lon", "--longitude", type=float, default=0.0, dest="lon", help="Initial camera/aircraft longitude in degrees (default: 0.0)")
@@ -500,6 +510,10 @@ if __name__ == "__main__":
                         choices=["debug", "info", "warning", "error", "critical"],
                         type=str.lower,
                         help="Logging level for orion-shadow (e.g. info, debug, warning, error. Default: warning)")
+    parser.add_argument("--tile-cache-dir", type=str, default="cache/tiles", help="Local directory path to cache downloaded map tiles (default: cache/tiles)")
+    parser.add_argument("--gpu-encoding", dest="gpu_encoding", action="store_true", default=None, help="Enable hardware GPU video encoding (NVIDIA NVENC)")
+    parser.add_argument("--no-gpu-encoding", dest="gpu_encoding", action="store_false", help="Disable hardware GPU video encoding, force CPU libx264")
+    parser.add_argument("--drape-subsample", type=int, default=6, help="Screen ray marching subsampling factor for 3D terrain (default: 6)")
     args = parser.parse_args()
 
     server = OrionServer(
@@ -527,8 +541,12 @@ if __name__ == "__main__":
         pan=args.pan,
         tilt=args.tilt,
         heading=args.heading,
-        speed=args.speed
+        speed=args.speed,
+        tile_cache_dir=args.tile_cache_dir,
+        gpu_encoding=args.gpu_encoding,
+        drape_subsample=args.drape_subsample
     )
+
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:

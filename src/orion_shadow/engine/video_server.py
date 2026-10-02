@@ -10,6 +10,9 @@ from typing import Optional, List, Tuple, Any, Dict, Set
 
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.visualizer import TileVisualizer
+from orion_shadow.engine.terrain import TerrainEngine
+from orion_shadow.engine.terrain_renderer import TerrainDraper
+
 
 try:
     import cv2
@@ -49,7 +52,11 @@ class VideoServer:
         max_tile_zoom: int = 17,
         tile_zoom: Optional[int] = None,
         prefetch_enabled: bool = True,
-        prefetch_distance: float = 3000.0
+        prefetch_distance: float = 3000.0,
+        terrain_engine: Optional[TerrainEngine] = None,
+        tile_cache_dir: Optional[str] = "cache/tiles",
+        gpu_encoding: Optional[bool] = None,
+        drape_subsample: int = 6
     ):
         self.state = state
         self.tile_url_template = tile_url_template
@@ -57,6 +64,20 @@ class VideoServer:
         self.fixed_tile_zoom = tile_zoom
         self.prefetch_enabled = prefetch_enabled
         self.prefetch_distance = prefetch_distance
+        self.terrain = terrain_engine or getattr(self.state, 'terrain', None)
+        self.drape_subsample = max(1, drape_subsample)
+        self.terrain_draper = (
+            TerrainDraper(self.terrain, sub_sample=self.drape_subsample)
+            if (self.terrain is not None and getattr(self.terrain, 'enabled', False))
+            else None
+        )
+        self.tile_cache_dir = tile_cache_dir
+        if self.tile_cache_dir:
+            try:
+                os.makedirs(self.tile_cache_dir, exist_ok=True)
+            except Exception:
+                pass
+
         self.visualizer = TileVisualizer(tile_url_template, zoom_max=max(20, max_tile_zoom)) if tile_url_template else None
         self.multicast_group = multicast_group
         self.port = port
@@ -65,11 +86,16 @@ class VideoServer:
         self.width = width
         self.height = height
 
+        self.has_ffmpeg = shutil.which("ffmpeg") is not None
+        self.gpu_encoding_enabled = (
+            gpu_encoding if gpu_encoding is not None else self._check_nvenc_available()
+        )
+
+
         self.session = None
         self.current_frame = None
         self.proc: Optional[Any] = None
         self.sock: Optional[socket.socket] = None
-        self.has_ffmpeg = shutil.which("ffmpeg") is not None
         self.tile_cache: Dict[Tuple[int, int, int], Any] = {}
         self._pending_tile_fetches: Set[Tuple[int, int, int]] = set()
         self._fetch_semaphore: Optional[asyncio.Semaphore] = None
@@ -88,9 +114,57 @@ class VideoServer:
         self._cached_corners_frac: Optional[List[Tuple[float, float]]] = None
         self._cached_y_top: int = -9999
         self._cached_warped_frame: Optional[Any] = None
+        self._cached_telem_key: Optional[Tuple] = None
 
         # Resized-tile cache: avoids cv2.resize on every tile every frame
         self._resized_cache: Dict[Tuple[Tuple[int, int, int], int], Any] = {}
+
+    @property
+    def is_3d_terrain_active(self) -> bool:
+        """Indicates whether 3D draped terrain rendering is active (both tiles and DTED present)."""
+        return (
+            self.visualizer is not None
+            and self.terrain is not None
+            and getattr(self.terrain, 'enabled', False)
+            and len(getattr(self.terrain, 'tiles', [])) > 0
+        )
+
+    def _check_nvenc_available(self) -> bool:
+        """Checks if ffmpeg supports h264_nvenc and hardware encoder is functional."""
+        if not shutil.which("ffmpeg"):
+            return False
+        try:
+            res = subprocess.run(
+                ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=0.1:size=64x64:rate=10",
+                 "-c:v", "h264_nvenc", "-f", "null", "-"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=1.5
+            )
+            return res.returncode == 0
+        except Exception:
+            return False
+
+    def _get_tile_disk_path(self, z: int, x: int, y: int) -> Optional[str]:
+        """Returns standard XYZ local disk cache file path for tile (z, x, y)."""
+        if not self.tile_cache_dir:
+            return None
+        return os.path.join(self.tile_cache_dir, str(z), str(x), f"{y}.png")
+
+    def _load_tile_from_disk(self, z: int, x: int, y: int) -> Optional[Any]:
+        """Loads a tile from local disk cache into memory if present."""
+        disk_path = self._get_tile_disk_path(z, x, y)
+        if disk_path and os.path.isfile(disk_path) and cv2 is not None:
+            try:
+                img = cv2.imread(disk_path, cv2.IMREAD_COLOR)
+                if img is not None:
+                    if len(self.tile_cache) > 2048:
+                        self.tile_cache.pop(next(iter(self.tile_cache)))
+                    self.tile_cache[(z, x, y)] = img
+                    return img
+            except Exception:
+                pass
+        return None
 
     def _detect_local_ip(self) -> str:
         """Determines best local IP for multicast interface routing."""
@@ -106,12 +180,19 @@ class VideoServer:
             return "127.0.0.1"
 
     async def _fetch_tile_worker(self, z: int, x: int, y: int):
-        """Asynchronously fetches and decodes a tile in the background without blocking video rendering."""
-        if self.session is None or self.visualizer is None or cv2 is None or np is None:
-            return
+        """Asynchronously fetches and decodes a tile with local disk caching."""
         cache_key = (z, x, y)
         if cache_key in self.tile_cache:
             self._pending_tile_fetches.discard(cache_key)
+            return
+
+        # Check local disk cache before hitting network
+        disk_img = self._load_tile_from_disk(z, x, y)
+        if disk_img is not None:
+            self._pending_tile_fetches.discard(cache_key)
+            return
+
+        if self.session is None or self.visualizer is None or cv2 is None or np is None:
             return
 
         if self._fetch_semaphore is None:
@@ -124,6 +205,17 @@ class VideoServer:
                 async with self.session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as response:
                     if response.status == 200:
                         content = await response.read()
+
+                        # Persist downloaded tile to local disk cache for future use
+                        disk_path = self._get_tile_disk_path(z, x, y)
+                        if disk_path:
+                            try:
+                                os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+                                with open(disk_path, "wb") as f:
+                                    f.write(content)
+                            except Exception:
+                                pass
+
                         nparr = np.frombuffer(content, np.uint8)
                         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         if img is not None:
@@ -140,30 +232,40 @@ class VideoServer:
         cache_key = (z, x, y)
         if cache_key in self.tile_cache:
             return self.tile_cache[cache_key]
+        disk_img = self._load_tile_from_disk(z, x, y)
+        if disk_img is not None:
+            return disk_img
         await self._fetch_tile_worker(z, x, y)
         return self.tile_cache.get(cache_key)
 
     def _get_tile_or_parent(self, z: int, x: int, y: int) -> Optional[Any]:
         """
-        Retrieves tile (z, x, y) from cache. If not present, checks lower zoom level parent
-        tiles in the cache and extracts the scaled sub-region so imagery is never pitch black.
+        Retrieves tile (z, x, y) from memory or local disk cache. If not present, checks lower zoom level parent
+        tiles in memory and on disk and extracts the scaled sub-region so imagery is never pitch black.
         """
+        # 1. Check in-memory cache
         if (z, x, y) in self.tile_cache:
             return self.tile_cache[(z, x, y)]
+
+        # 2. Check local disk cache
+        disk_img = self._load_tile_from_disk(z, x, y)
+        if disk_img is not None:
+            return disk_img
 
         if cv2 is None or np is None:
             return None
 
-        # Check up to 5 zoom levels up for an available parent tile
+        # 3. Check up to 5 zoom levels up for an available parent tile in memory or on disk
         min_z = max(1, z - 5)
         for pz in range(z - 1, min_z - 1, -1):
             dz = z - pz
             px = x >> dz
             py = y >> dz
-            if (pz, px, py) in self.tile_cache:
-                parent_img = self.tile_cache[(pz, px, py)]
-                if parent_img is None or not isinstance(parent_img, np.ndarray):
-                    continue
+            parent_img = self.tile_cache.get((pz, px, py))
+            if parent_img is None:
+                parent_img = self._load_tile_from_disk(pz, px, py)
+
+            if parent_img is not None and isinstance(parent_img, np.ndarray):
                 ph, pw = parent_img.shape[:2]
                 sub_w = pw / float(1 << dz)
                 sub_h = ph / float(1 << dz)
@@ -177,6 +279,7 @@ class VideoServer:
                 if cropped.size > 0:
                     return cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_LINEAR)
         return None
+
 
     async def _prefetch_loop(self):
         """
@@ -568,7 +671,7 @@ class VideoServer:
                 footprint = self.visualizer.compute_footprint(
                     telem['lat'], telem['lon'], alt,
                     telem['cam_hdg'], telem['cam_pitch'],
-                    hfov, vfov, zoom, max_tiles=600
+                    hfov, vfov, zoom, max_tiles=1500
                 )
 
             tiles_to_fetch = []
@@ -593,7 +696,7 @@ class VideoServer:
 
             # Trigger background asynchronous fetch for missing tiles
             if missing_tiles and self.session is not None and not self.session.closed:
-                for key in missing_tiles[:32]:
+                for key in missing_tiles[:96]:
                     self._pending_tile_fetches.add(key)
                     asyncio.create_task(self._fetch_tile_worker(*key))
 
@@ -652,6 +755,48 @@ class VideoServer:
                     self._cached_tile_px = tile_px
                     self._cached_tile_bounds = tile_bounds
 
+                # If both tile-url and dted-path are provided and active, drape map over 3D terrain
+                if self.is_3d_terrain_active:
+                    if self.terrain_draper is None and self.terrain is not None:
+                        self.terrain_draper = TerrainDraper(self.terrain, sub_sample=self.drape_subsample)
+
+                    if self.terrain_draper is not None:
+                        telem_key = (
+                            round(telem['lat'], 4),
+                            round(telem['lon'], 4),
+                            round(telem['alt'], 1),
+                            round(telem['cam_hdg'], 1),
+                            round(telem['cam_pitch'], 1),
+                            round(telem.get('cam_roll', 0.0), 1),
+                            round(telem['zoom'], 2)
+                        )
+                        if tiles_changed or self._cached_telem_key != telem_key or self._cached_warped_frame is None:
+                            try:
+                                base_sky = self._generate_synthetic_background()
+                                draped_frame = self.terrain_draper.render(
+                                    ground_texture=self._cached_ground,
+                                    tile_bounds=footprint['tile_bounds'],
+                                    tile_px=tile_px,
+                                    zoom=zoom,
+                                    telem=telem,
+                                    width=self.width,
+                                    height=self.height,
+                                    hfov=hfov,
+                                    vfov=vfov,
+                                    base_sky_frame=base_sky
+                                )
+                                if draped_frame is not None:
+                                    self._cached_warped_frame = draped_frame
+                                    self._cached_telem_key = telem_key
+                            except Exception:
+                                self._cached_warped_frame = None
+
+                        if self._cached_warped_frame is not None:
+                            frame = self._cached_warped_frame.copy()
+                            self.current_frame = self._draw_hud(frame)
+                            return
+
+                # --- Fallback: Flat 2D planar perspective warp (tile-url only) ---
                 horizon_y = int(self.height / 2.0 + telem['cam_pitch'] * ppd_v)
                 # sky_top is the pixel row where sky ends and ground begins (for sky compositing only)
                 sky_top = max(0, min(self.height - 2, horizon_y)) if horizon_y > 0 else 0
@@ -673,12 +818,6 @@ class VideoServer:
                         # tile content between the far (horizon) and near (bottom) ground
                         # across the rows sky_top..height-1, and the sky compositing
                         # covers rows 0..sky_top-1.
-                        #
-                        # Mapping far corners to row 0 (previous approach) was wrong: the
-                        # sky overlay would hide those tiles, and the slice of the warp
-                        # visible below sky_top started from an intermediate distance —
-                        # much closer than the actual horizon — creating the false altitude-
-                        # gain illusion exactly when sky first became visible.
                         dst_pts = np.float32([
                             [0,              sky_top],
                             [self.width - 1, sky_top],
@@ -716,6 +855,7 @@ class VideoServer:
                 # Apply HUD on a copy of the cached warp (HUD updates every frame)
                 if self._cached_warped_frame is not None:
                     frame = self._cached_warped_frame.copy()
+
                     self.current_frame = self._draw_hud(frame)
                     return
 
@@ -748,6 +888,37 @@ class VideoServer:
         if local_ip:
             dest_url += f"&localaddr={local_ip}"
 
+        if self.gpu_encoding_enabled:
+            nvenc_cmd = [
+                "ffmpeg",
+                "-y",
+                "-nostats",
+                "-loglevel", "warning",
+                "-f", "rawvideo",
+                "-pix_fmt", "bgr24",
+                "-s", f"{self.width}x{self.height}",
+                "-r", str(self.fps),
+                "-i", "pipe:0",
+                "-c:v", "h264_nvenc",
+                "-preset", "p1",
+                "-tune", "ull",
+                "-zerolatency", "1",
+                "-pix_fmt", "yuv420p",
+                "-f", "mpegts",
+                dest_url
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *nvenc_cmd,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                print("[+] Hardware GPU Video Encoding active (NVIDIA NVENC h264_nvenc)")
+                return proc
+            except Exception as e:
+                print(f"[!] Warning: Failed to spawn ffmpeg with NVENC ({e}), falling back to libx264...")
+
         cmd = [
             "ffmpeg",
             "-y",
@@ -776,6 +947,7 @@ class VideoServer:
         except Exception as e:
             print(f"[!] Warning: Failed to spawn ffmpeg: {e}")
             return None
+
 
     async def start(self):
         """Starts the multicast video streaming loop."""
