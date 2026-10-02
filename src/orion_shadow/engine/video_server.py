@@ -8,11 +8,6 @@ import sys
 import time
 from typing import Optional, List, Tuple, Any, Dict, Set
 
-# Ensure local site-packages is in sys.path if present
-for extra_path in ['/home/user/.local/lib/python3.9/site-packages', os.path.expanduser('~/.local/lib/python3.9/site-packages')]:
-    if os.path.isdir(extra_path) and extra_path not in sys.path:
-        sys.path.append(extra_path)
-
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.visualizer import TileVisualizer
 

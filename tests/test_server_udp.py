@@ -192,7 +192,7 @@ class TestOrionServerSdkPorts(unittest.TestCase):
         time.sleep(0.1)
 
         try:
-            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            sys.path.insert(0, "../../orion-sdk/Communications/python")
             from orion_sdk.connection import OrionConnection
             from orion_sdk.packets import OrionCameras
 
@@ -234,7 +234,7 @@ class TestOrionServerSdkPorts(unittest.TestCase):
         time.sleep(0.1)
 
         try:
-            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            sys.path.insert(0, "../../orion-sdk/Communications/python")
             from orion_sdk.connection import OrionConnection
             from orion_sdk.packets import GeolocateTelemetryCore
 
@@ -267,7 +267,7 @@ class TestOrionServerSdkPorts(unittest.TestCase):
         time.sleep(0.1)
 
         try:
-            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            sys.path.insert(0, "../../orion-sdk/Communications/python")
             from orion_sdk.connection import OrionConnection
             from orion_sdk.packets import OrionLimitsData
             import math
@@ -324,7 +324,7 @@ class TestOrionServerSdkPorts(unittest.TestCase):
         time.sleep(0.1)
 
         try:
-            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            sys.path.insert(0, "../../orion-sdk/Communications/python")
             from orion_sdk.connection import OrionConnection
             from orion_sdk.packets import OrionCameraState, GeolocateTelemetryCore
             import math
@@ -379,7 +379,7 @@ class TestOrionServerSdkPorts(unittest.TestCase):
         time.sleep(0.1)
 
         try:
-            sys.path.insert(0, "/home/user/dev/orion-sdk/Communications/python")
+            sys.path.insert(0, "../../orion-sdk/Communications/python")
             from orion_sdk.connection import OrionConnection
             from orion_sdk.packets import GpsData, OrionExtHeadingData
             import math
