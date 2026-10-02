@@ -56,7 +56,8 @@ class VideoServer:
         terrain_engine: Optional[TerrainEngine] = None,
         tile_cache_dir: Optional[str] = "cache/tiles",
         gpu_encoding: Optional[bool] = None,
-        drape_subsample: int = 6
+        drape_subsample: int = 6,
+        distance_lod: bool = True
     ):
         self.state = state
         self.tile_url_template = tile_url_template
@@ -64,6 +65,7 @@ class VideoServer:
         self.fixed_tile_zoom = tile_zoom
         self.prefetch_enabled = prefetch_enabled
         self.prefetch_distance = prefetch_distance
+        self.distance_lod = distance_lod
         self.terrain = terrain_engine or getattr(self.state, 'terrain', None)
         self.drape_subsample = max(1, drape_subsample)
         self.terrain_draper = (
@@ -146,10 +148,22 @@ class VideoServer:
             return False
 
     def _get_tile_disk_path(self, z: int, x: int, y: int) -> Optional[str]:
-        """Returns standard XYZ local disk cache file path for tile (z, x, y)."""
-        if not self.tile_cache_dir:
-            return None
-        return os.path.join(self.tile_cache_dir, str(z), str(x), f"{y}.png")
+        """Returns standard XYZ local disk cache file path for tile (z, x, y), resolving existing files across common cache paths."""
+        rel_subpath = os.path.join(str(z), str(x), f"{y}.png")
+        candidates = []
+        if self.tile_cache_dir:
+            candidates.append(os.path.join(self.tile_cache_dir, rel_subpath))
+        candidates.append(os.path.join("src", "cache", "tiles", rel_subpath))
+        candidates.append(os.path.join("cache", "tiles", rel_subpath))
+
+        pkg_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+        candidates.append(os.path.join(pkg_root, "src", "cache", "tiles", rel_subpath))
+        candidates.append(os.path.join(pkg_root, "cache", "tiles", rel_subpath))
+
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        return candidates[0] if candidates else None
 
     def _load_tile_from_disk(self, z: int, x: int, y: int) -> Optional[Any]:
         """Loads a tile from local disk cache into memory if present."""
@@ -277,7 +291,59 @@ class VideoServer:
                 y1 = max(y0 + 1, int(round(sub_y + sub_h)))
                 cropped = parent_img[y0:y1, x0:x1]
                 if cropped.size > 0:
-                    return cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_LINEAR)
+                    stitched = cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_LINEAR)
+                    if len(self.tile_cache) > 2048:
+                        self.tile_cache.pop(next(iter(self.tile_cache)))
+                    self.tile_cache[(z, x, y)] = stitched
+                    return stitched
+
+        # 4. Check child / grandchild tiles (finer zoom, e.g. synthesize Z13 or Z12 from Z14)
+        for cz in (z + 1, z + 2):
+            if cz > self.max_tile_zoom:
+                break
+            dz = cz - z
+            scale = 1 << dz
+            base_cx = x * scale
+            base_cy = y * scale
+            child_tiles = {}
+            for dy in range(scale):
+                for dx in range(scale):
+                    c_coord = (cz, base_cx + dx, base_cy + dy)
+                    c_img = self.tile_cache.get(c_coord)
+                    if c_img is None:
+                        c_img = self._load_tile_from_disk(*c_coord)
+                    if c_img is not None and isinstance(c_img, np.ndarray):
+                        child_tiles[(dx, dy)] = c_img
+
+            if child_tiles:
+                sample_img = next(iter(child_tiles.values()))
+                ch, cw = sample_img.shape[:2]
+                composite_w = cw * scale
+                composite_h = ch * scale
+                composite = np.zeros((composite_h, composite_w, 3), dtype=np.uint8)
+                mean_color = np.mean([np.mean(img, axis=(0, 1)) for img in child_tiles.values()], axis=0).astype(np.uint8)
+                composite[:, :] = mean_color
+
+                for (dx, dy), c_img in child_tiles.items():
+                    if c_img.shape[0] != ch or c_img.shape[1] != cw:
+                        c_img = cv2.resize(c_img, (cw, ch), interpolation=cv2.INTER_LINEAR)
+                    composite[dy * ch:(dy + 1) * ch, dx * cw:(dx + 1) * cw] = c_img
+
+                stitched = cv2.resize(composite, (cw, ch), interpolation=cv2.INTER_AREA)
+                if len(self.tile_cache) > 2048:
+                    self.tile_cache.pop(next(iter(self.tile_cache)))
+                self.tile_cache[(z, x, y)] = stitched
+
+                # Persist synthesized tile to disk cache so it is available immediately next time
+                disk_path = self._get_tile_disk_path(z, x, y)
+                if disk_path:
+                    try:
+                        os.makedirs(os.path.dirname(disk_path), exist_ok=True)
+                        cv2.imwrite(disk_path, stitched)
+                    except Exception:
+                        pass
+                return stitched
+
         return None
 
 
@@ -321,14 +387,16 @@ class VideoServer:
                     vfov=vfov,
                     zoom=tile_zoom,
                     lookahead_distance=self.prefetch_distance,
-                    steps=4
+                    steps=4,
+                    distance_lod=self.distance_lod
                 )
 
-                # Filter for tiles not yet in cache or pending
-                to_prefetch = [
-                    t for t in future_tiles
-                    if t not in self.tile_cache and t not in self._pending_tile_fetches
-                ]
+                # Filter for tiles not yet in cache or pending (resolving from disk / hierarchy first)
+                to_prefetch = []
+                for t in future_tiles:
+                    if t not in self.tile_cache and t not in self._pending_tile_fetches:
+                        if self._get_tile_or_parent(*t) is None:
+                            to_prefetch.append(t)
 
                 # Queue background downloads in manageable batches
                 for key in to_prefetch[:48]:
@@ -407,9 +475,9 @@ class VideoServer:
 
         # Depression angle at boresight (degrees below horizontal)
         depression = max(5.0, -cam_pitch)
-        boresight_dist = alt / math.tan(math.radians(depression))
+        slant_dist = alt / math.sin(math.radians(depression))
         # Ground width visible across the full image
-        ground_width = 2.0 * boresight_dist * math.tan(math.radians(hfov / 2.0))
+        ground_width = 2.0 * slant_dist * math.tan(math.radians(hfov / 2.0))
         # Output GSD: meters per output pixel
         output_gsd = ground_width / max(1, self.width)
 
@@ -419,7 +487,7 @@ class VideoServer:
         cos_lat = math.cos(math.radians(lat))
         if output_gsd > 0:
             z = math.log2(EARTH_CIRCUMFERENCE * cos_lat / (256.0 * output_gsd))
-            z = int(round(z))
+            z = int(math.floor(z))
         else:
             z = self.max_tile_zoom
         return max(14, min(self.max_tile_zoom, z))
@@ -671,7 +739,8 @@ class VideoServer:
                 footprint = self.visualizer.compute_footprint(
                     telem['lat'], telem['lon'], alt,
                     telem['cam_hdg'], telem['cam_pitch'],
-                    hfov, vfov, zoom, max_tiles=1500
+                    hfov, vfov, zoom, max_ground_range=65000.0, max_tiles=1500,
+                    distance_lod=self.distance_lod
                 )
 
             tiles_to_fetch = []
@@ -725,30 +794,76 @@ class VideoServer:
 
                 # Rebuild ground image only when tile set changes
                 if tiles_changed or self._cached_ground is None:
-                    ground = np.zeros((n_rows * tile_px, n_cols * tile_px, 3),
-                                      dtype=np.uint8)
+                    # Sort tiles by zoom level ascending (e.g. 13, 14, 15, 16, 17)
+                    # Lower-zoom (parent/coarse) tiles are drawn first, then overwritten
+                    # by higher-zoom (child/fine) tiles where available.
+                    sorted_tiles = sorted(tile_results.items(), key=lambda item: item[0][0])
+
+                    canvas_w = n_cols * tile_px
+                    canvas_h = n_rows * tile_px
+                    ground = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
                     ground[:, :] = (38, 72, 45)  # Natural earth-green base to avoid black voids
-                    for (z, tx, ty), img in tile_results.items():
-                        if img is not None:
-                            col = tx - min_tx
-                            row = ty - min_ty
-                            if 0 <= col < n_cols and 0 <= row < n_rows:
-                                # Cache resized tiles to avoid redundant resize
-                                rk = ((z, tx, ty), tile_px)
-                                if rk not in self._resized_cache:
-                                    if tile_px == 256 and img.shape[0] == 256 and img.shape[1] == 256:
-                                        self._resized_cache[rk] = img
-                                    else:
-                                        self._resized_cache[rk] = cv2.resize(
-                                            img, (tile_px, tile_px),
-                                            interpolation=cv2.INTER_LINEAR)
-                                    # Evict old resized entries
-                                    if len(self._resized_cache) > 2048:
-                                        oldest = next(iter(self._resized_cache))
-                                        del self._resized_cache[oldest]
-                                ground[row * tile_px:(row + 1) * tile_px,
-                                       col * tile_px:(col + 1) * tile_px] = \
-                                    self._resized_cache[rk]
+
+                    for (z, tx, ty), img in sorted_tiles:
+                        if img is None or not isinstance(img, np.ndarray):
+                            continue
+
+                        dz = zoom - z
+                        if dz >= 0:
+                            # Tile is at base zoom or lower zoom (coarse parent)
+                            scale = 1 << dz
+                            col_start = (tx * scale - min_tx) * tile_px
+                            col_end = ((tx + 1) * scale - min_tx) * tile_px
+                            row_start = (ty * scale - min_ty) * tile_px
+                            row_end = ((ty + 1) * scale - min_ty) * tile_px
+                        else:
+                            # Tile is at higher zoom than base zoom (fine child)
+                            scale = 1 << (-dz)
+                            col_start = int((tx / scale - min_tx) * tile_px)
+                            col_end = int(((tx + 1) / scale - min_tx) * tile_px)
+                            row_start = int((ty / scale - min_ty) * tile_px)
+                            row_end = int(((ty + 1) / scale - min_ty) * tile_px)
+
+                        c0 = max(0, col_start)
+                        c1 = min(canvas_w, col_end)
+                        r0 = max(0, row_start)
+                        r1 = min(canvas_h, row_end)
+
+                        if c1 <= c0 or r1 <= r0:
+                            continue
+
+                        tile_w = col_end - col_start
+                        tile_h = row_end - row_start
+                        ih, iw = img.shape[:2]
+
+                        if c0 == col_start and c1 == col_end and r0 == row_start and r1 == row_end:
+                            sub_img = img
+                        else:
+                            ix0 = max(0, min(iw - 1, int(round((c0 - col_start) / float(tile_w) * iw))))
+                            ix1 = max(ix0 + 1, min(iw, int(round((c1 - col_start) / float(tile_w) * iw))))
+                            iy0 = max(0, min(ih - 1, int(round((r0 - row_start) / float(tile_h) * ih))))
+                            iy1 = max(iy0 + 1, min(ih, int(round((r1 - row_start) / float(tile_h) * ih))))
+                            sub_img = img[iy0:iy1, ix0:ix1]
+
+                        target_w = c1 - c0
+                        target_h = r1 - r0
+
+                        if sub_img.size == 0 or target_w <= 0 or target_h <= 0:
+                            continue
+
+                        if sub_img.shape[0] == target_h and sub_img.shape[1] == target_w:
+                            resized = sub_img
+                        else:
+                            rk = ((z, tx, ty), target_w, target_h)
+                            if rk in self._resized_cache:
+                                resized = self._resized_cache[rk]
+                            else:
+                                resized = cv2.resize(sub_img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                                if len(self._resized_cache) > 2048:
+                                    self._resized_cache.pop(next(iter(self._resized_cache)))
+                                self._resized_cache[rk] = resized
+
+                        ground[r0:r1, c0:c1] = resized
 
                     self._cached_ground = ground
                     self._cached_tile_keys = current_tile_keys

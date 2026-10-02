@@ -218,8 +218,9 @@ class TerrainDraper:
         lat_rad = np.radians(hit_lat_clamped)
         hit_ty = (1.0 - np.log(np.tan(lat_rad) + 1.0 / np.cos(lat_rad)) / math.pi) / 2.0 * n_zoom
 
-        u_tex = (hit_tx - min_tx) * float(tile_px)
-        v_tex = (hit_ty - min_ty) * float(tile_px)
+        canvas_h, canvas_w = ground_texture.shape[:2]
+        u_tex = np.clip((hit_tx - min_tx) * float(tile_px), 0.0, float(max(1, canvas_w - 1)))
+        v_tex = np.clip((hit_ty - min_ty) * float(tile_px), 0.0, float(max(1, canvas_h - 1)))
 
         u_tex[is_sky] = -1.0
         v_tex[is_sky] = -1.0
@@ -305,6 +306,8 @@ class TerrainDraper:
         # Pixels that cleared mountain peaks show the atmospheric sky gradient
         if base_sky_frame is not None and isinstance(base_sky_frame, np.ndarray):
             out_frame = base_sky_frame.copy()
+            if np.any(sky_mask):
+                out_frame[sky_mask] = np.array([185, 165, 140], dtype=np.uint8)
             out_frame[~sky_mask] = draped_hazed[~sky_mask]
             return out_frame
         else:

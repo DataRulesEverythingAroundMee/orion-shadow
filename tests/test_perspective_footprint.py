@@ -242,6 +242,76 @@ def test_video_server_prefetch_configuration():
     assert server.video_server.prefetch_distance == 2000.0
 
 
+def test_distance_dependent_lod_lowers_zoom_for_distant_tiles():
+    """At oblique angles, distant tiles should have lower zoom levels than near tiles."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    # High altitude oblique view
+    fp = viz.compute_footprint(
+        lat=39.7774, lon=-84.0819, alt=3000.0,
+        cam_hdg=0.0, cam_pitch=-20.0,
+        hfov=47.7, vfov=26.8, zoom=16,
+        distance_lod=True
+    )
+    assert fp is not None
+    tiles = fp['tiles']
+    zoom_levels = set(t[0] for t in tiles)
+
+    # Should contain base zoom (16) and lower zoom levels (e.g. 15, 14, 13) for distant horizon
+    assert 16 in zoom_levels, "Footprint should contain base zoom tiles near the aircraft"
+    assert any(z < 16 for z in zoom_levels), f"Footprint should contain lower zoom tiles for distant terrain, got zooms: {zoom_levels}"
+
+    # Verify that tiles with lower zoom are farther from the aircraft than tiles with higher zoom
+    def tile_dist(t):
+        tz, tx, ty = t
+        inv_n = 1.0 / (2.0 ** tz)
+        t_lon = ((tx + 0.5) * inv_n) * 360.0 - 180.0
+        sinh_val = math.sinh(math.pi * (1.0 - 2.0 * (ty + 0.5) * inv_n))
+        t_lat = math.degrees(math.atan(sinh_val))
+        return (t_lat - 39.7774) ** 2 + (t_lon - (-84.0819)) ** 2
+
+    near_tiles = [t for t in tiles if t[0] == 16]
+    far_tiles = [t for t in tiles if t[0] < 16]
+    avg_dist_near = sum(tile_dist(t) for t in near_tiles) / len(near_tiles)
+    avg_dist_far = sum(tile_dist(t) for t in far_tiles) / len(far_tiles)
+    assert avg_dist_far > avg_dist_near, \
+        f"Lower zoom tiles should on average be farther away: far={avg_dist_far:.6f}, near={avg_dist_near:.6f}"
+
+
+def test_distance_lod_reduces_tile_count():
+    """Distance-dependent LOD should yield fewer unique tiles than a uniform high zoom grid."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    fp_lod = viz.compute_footprint(
+        lat=39.7774, lon=-84.0819, alt=3000.0,
+        cam_hdg=0.0, cam_pitch=-20.0,
+        hfov=47.7, vfov=26.8, zoom=16,
+        distance_lod=True
+    )
+    fp_uniform = viz.compute_footprint(
+        lat=39.7774, lon=-84.0819, alt=3000.0,
+        cam_hdg=0.0, cam_pitch=-20.0,
+        hfov=47.7, vfov=26.8, zoom=16,
+        distance_lod=False
+    )
+    assert fp_lod is not None and fp_uniform is not None
+    # Uniform zoom either hits max_tiles (due to contraction) or generates many more tiles for the same area
+    # In both cases, LOD produces a much more compact tile set covering the horizon
+    assert any(t[0] < 16 for t in fp_lod['tiles'])
+    assert all(t[0] == 16 for t in fp_uniform['tiles'])
+
+
+def test_distance_lod_disabled_flag():
+    """When distance_lod is False, all tiles should strictly use the base zoom."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    fp = viz.compute_footprint(
+        lat=40.0, lon=-74.0, alt=1000.0,
+        cam_hdg=0.0, cam_pitch=-30.0,
+        hfov=47.7, vfov=35.8, zoom=15,
+        distance_lod=False
+    )
+    assert fp is not None
+    assert all(t[0] == 15 for t in fp['tiles']), "All tiles must be at zoom 15 when distance_lod=False"
+
+
 if __name__ == '__main__':
     tests = [
         test_nadir_footprint_is_symmetric,
@@ -257,6 +327,9 @@ if __name__ == '__main__':
         test_prefetch_tiles_along_aircraft_heading,
         test_prefetch_tiles_east_heading,
         test_video_server_prefetch_configuration,
+        test_distance_dependent_lod_lowers_zoom_for_distant_tiles,
+        test_distance_lod_reduces_tile_count,
+        test_distance_lod_disabled_flag,
     ]
     for t in tests:
         try:

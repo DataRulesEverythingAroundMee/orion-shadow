@@ -188,8 +188,11 @@ class TestDrapedTerrain(unittest.TestCase):
         self.assertIsNotNone(vs.current_frame)
         self.assertEqual(vs.current_frame.shape, (360, 640, 3))
 
-    def test_video_server_fallback_when_libraries_missing(self):
-        """Verify that when 3D draped terrain is enabled but libraries are unavailable, fallback generates frame gracefully."""
+    def test_video_server_mixed_zoom_lod_rendering(self):
+        """Verify VideoServer successfully composites mixed-resolution tiles (LOD) into ground canvas."""
+        if np is None or cv2 is None:
+            self.skipTest("cv2 or numpy not installed")
+
         engine = TerrainEngine(self.slope_dted)
         state = GimbalState(dt=0.1, terrain_engine=engine, lat=34.2, lon=-118.5, alt=1200.0, tilt=-25.0)
         state.initialized = True
@@ -199,16 +202,135 @@ class TestDrapedTerrain(unittest.TestCase):
             tile_url_template=self.tile_url,
             terrain_engine=engine,
             width=640,
-            height=360
+            height=360,
+            distance_lod=True
         )
-        self.assertTrue(vs.is_3d_terrain_active)
+
+        # Prepopulate cache with both coarse zoom 14 and fine zoom 15 mock tiles
+        coarse_tile = np.full((256, 256, 3), 90, dtype=np.uint8)
+        fine_tile = np.full((256, 256, 3), 190, dtype=np.uint8)
+
+        for tx in range(2500, 2515):
+            for ty in range(2500, 2515):
+                vs.tile_cache[(14, tx, ty)] = coarse_tile
+                vs.tile_cache[(15, tx * 2, ty * 2)] = fine_tile
 
         import asyncio
         asyncio.run(vs._update_frame())
 
         self.assertIsNotNone(vs.current_frame)
+        self.assertEqual(vs.current_frame.shape, (360, 640, 3))
+        if vs._cached_ground is not None:
+            # Ground canvas must have been constructed with valid pixels
+            self.assertTrue(np.any(vs._cached_ground > 0))
+
+    def test_child_tile_stitching_and_fallback(self):
+        """Verify _get_tile_or_parent synthesizes missing parent tiles from available child tiles."""
+        if np is None or cv2 is None:
+            self.skipTest("cv2 or numpy not installed")
+
+        state = GimbalState()
+        vs = VideoServer(state, tile_cache_dir=None)
+
+        # Place 4 child tiles at zoom 14
+        c14_00 = np.full((256, 256, 3), 10, dtype=np.uint8)
+        c14_10 = np.full((256, 256, 3), 20, dtype=np.uint8)
+        c14_01 = np.full((256, 256, 3), 30, dtype=np.uint8)
+        c14_11 = np.full((256, 256, 3), 40, dtype=np.uint8)
+
+        # Target parent tile: z=13, x=100, y=200
+        vs.tile_cache[(14, 200, 400)] = c14_00
+        vs.tile_cache[(14, 201, 400)] = c14_10
+        vs.tile_cache[(14, 200, 401)] = c14_01
+        vs.tile_cache[(14, 201, 401)] = c14_11
+
+        synthesized = vs._get_tile_or_parent(13, 100, 200)
+        self.assertIsNotNone(synthesized)
+        self.assertEqual(synthesized.shape, (256, 256, 3))
+        # Verify the tile was stored in memory cache
+        self.assertIn((13, 100, 200), vs.tile_cache)
+
+    def test_grandchild_tile_stitching_fallback(self):
+        """Verify _get_tile_or_parent synthesizes missing coarse tiles (z=12) from grandchildren (z=14)."""
+        if np is None or cv2 is None:
+            self.skipTest("cv2 or numpy not installed")
+
+        state = GimbalState()
+        vs = VideoServer(state, tile_cache_dir=None)
+
+        # Place grandchildren tiles at zoom 14 for parent z=12, x=50, y=60
+        for dx in range(4):
+            for dy in range(4):
+                vs.tile_cache[(14, 50 * 4 + dx, 60 * 4 + dy)] = np.full((256, 256, 3), 50 + dx * 10 + dy, dtype=np.uint8)
+
+        synthesized = vs._get_tile_or_parent(12, 50, 60)
+        self.assertIsNotNone(synthesized)
+        self.assertEqual(synthesized.shape, (256, 256, 3))
+        self.assertIn((12, 50, 60), vs.tile_cache)
+
+    def test_tile_cache_path_discovery(self):
+        """Verify _get_tile_disk_path resolves files across candidate paths."""
+        state = GimbalState()
+        vs = VideoServer(state, tile_cache_dir="nonexistent_cache_dir")
+        # Check a tile that is known to exist in src/cache/tiles
+        existing_path = vs._get_tile_disk_path(14, 4363, 6211)
+        self.assertIsNotNone(existing_path)
+        self.assertTrue(os.path.isfile(existing_path))
+
+
+    def test_dted_data_merged_with_map_tiles_on_update(self):
+        """Verify that DTED elevation data is merged with map tiles and updates dynamically when tiles change."""
+        if np is None or cv2 is None:
+            self.skipTest("cv2 or numpy not installed")
+
+        engine = TerrainEngine(self.slope_dted)
+        state = GimbalState(dt=0.1, terrain_engine=engine, lat=34.2, lon=-118.5, alt=1200.0, tilt=-25.0)
+        state.initialized = True
+
+        vs = VideoServer(
+            state,
+            tile_url_template=self.tile_url,
+            terrain_engine=engine,
+            width=640,
+            height=360,
+            distance_lod=True
+        )
+        self.assertTrue(vs.is_3d_terrain_active)
+
+        # 1. Populate cache with initial blue tiles
+        blue_tile = np.zeros((256, 256, 3), dtype=np.uint8)
+        blue_tile[:, :, 0] = 255  # pure blue
+        for tx in range(2500, 2515):
+            for ty in range(2500, 2515):
+                vs.tile_cache[(14, tx, ty)] = blue_tile
+
+        import asyncio
+        asyncio.run(vs._update_frame())
+        frame_1 = vs.current_frame.copy()
+        self.assertIsNotNone(frame_1)
+        ground_1 = vs._cached_ground.copy()
+
+        # Verify ground canvas has blue pixels
+        self.assertTrue(np.any(ground_1[:, :, 0] > 200))
+
+        # 2. Update tiles in cache with red tiles
+        red_tile = np.zeros((256, 256, 3), dtype=np.uint8)
+        red_tile[:, :, 2] = 255  # pure red
+        for tx in range(2500, 2515):
+            for ty in range(2500, 2515):
+                vs.tile_cache[(14, tx, ty)] = red_tile
+
+        asyncio.run(vs._update_frame())
+        frame_2 = vs.current_frame.copy()
+        ground_2 = vs._cached_ground.copy()
+
+        # Verify ground canvas updated to red pixels
+        self.assertTrue(np.any(ground_2[:, :, 2] > 200))
+        # Verify the draped output frame also updated reflecting the new tile data merged with DTED
+        self.assertFalse(np.array_equal(frame_1, frame_2))
 
 
 if __name__ == "__main__":
     unittest.main()
+
 

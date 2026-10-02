@@ -36,14 +36,15 @@ class OrionServer:
                  dt: float = 0.1, dted_path: Optional[str] = None, 
                  tile_url: Optional[str] = None, video_port: int = 5004,
                  multicast_group: str = '239.255.0.1', video_enabled: bool = True,
-                 log_level: str = 'warning', video_fps: int = 24,
+                 log_level: str = 'warning', video_fps: int = 10,
                  video_width: int = 1280, video_height: int = 720,
                  max_tile_zoom: int = 17, tile_zoom: Optional[int] = None,
                  prefetch: bool = True, prefetch_distance: float = 3000.0,
                  lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
                  pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0,
                  speed: float = 0.0, tile_cache_dir: Optional[str] = "cache/tiles",
-                 gpu_encoding: Optional[bool] = None, drape_subsample: int = 6):
+                 gpu_encoding: Optional[bool] = None, drape_subsample: int = 6,
+                 distance_lod: bool = True):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -107,7 +108,8 @@ class OrionServer:
                 prefetch_distance=prefetch_distance,
                 tile_cache_dir=tile_cache_dir,
                 gpu_encoding=gpu_encoding,
-                drape_subsample=drape_subsample
+                drape_subsample=drape_subsample,
+                distance_lod=distance_lod
             )
 
 
@@ -491,17 +493,17 @@ if __name__ == "__main__":
     parser.add_argument("--tile-url", type=str, default=None, help="XYZ tile URL template (e.g. 'https://{z}/{x}/{y}.png')")
     parser.add_argument("--multicast-group", type=str, default="239.255.0.1", help="Multicast IP address for video stream (default: 239.255.0.1)")
     parser.add_argument("--video-port", type=int, default=5004, help="Multicast UDP port for video stream (default: 5004)")
-    parser.add_argument("--fps", "--video-fps", type=int, default=24, dest="fps", help="Video stream framerate in FPS (default: 24)")
+    parser.add_argument("--fps", "--video-fps", type=int, default=10, dest="fps", help="Video stream framerate in FPS (default: 10)")
     parser.add_argument("--video-width", type=int, default=1280, help="Video stream width in pixels (default: 1280, e.g. 1280 for 720p HD)")
     parser.add_argument("--video-height", type=int, default=720, help="Video stream height in pixels (default: 720, e.g. 720 for 720p HD)")
     parser.add_argument("--tile-zoom", "--zoom", type=int, default=None, dest="tile_zoom", help="Fixed XYZ tile zoom level (e.g. 14..19, default: adaptive)")
     parser.add_argument("--max-tile-zoom", type=int, default=17, help="Maximum tile zoom level for adaptive resolution (default: 17)")
     parser.add_argument("--no-prefetch", action="store_false", dest="prefetch", help="Disable lookahead tile prefetching ahead of aircraft")
-    parser.add_argument("--prefetch-distance", type=float, default=15000.0, help="Lookahead distance in meters for prefetching tiles ahead of aircraft (default: 3000.0m)")
+    parser.add_argument("--prefetch-distance", type=float, default=10000.0, help="Lookahead distance in meters for prefetching tiles ahead of aircraft (default: 10000.0m)")
     parser.add_argument("--no-video", action="store_true", help="Disable multicast video streaming")
     parser.add_argument("--lat", "--latitude", type=float, default=0.0, dest="lat", help="Initial camera/aircraft latitude in degrees (default: 0.0)")
     parser.add_argument("--lon", "--longitude", type=float, default=0.0, dest="lon", help="Initial camera/aircraft longitude in degrees (default: 0.0)")
-    parser.add_argument("--alt", "--altitude", type=float, default=1000.0, dest="alt", help="Initial camera/aircraft altitude in meters MSL (default: 0.0)")
+    parser.add_argument("--alt", "--altitude", type=float, default=1000.0, dest="alt", help="Initial camera/aircraft altitude in meters MSL (default: 1000.0)")
     parser.add_argument("--pan", type=float, default=0.0, help="Initial gimbal pan in degrees (default: 0.0)")
     parser.add_argument("--tilt", type=float, default=None, help="Initial gimbal tilt in degrees (default: -20.0 if alt/lat/lon set, else 0.0)")
     parser.add_argument("--heading", type=float, default=0.0, help="Initial aircraft heading in degrees (default: 0.0)")
@@ -514,6 +516,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpu-encoding", dest="gpu_encoding", action="store_true", default=None, help="Enable hardware GPU video encoding (NVIDIA NVENC)")
     parser.add_argument("--no-gpu-encoding", dest="gpu_encoding", action="store_false", help="Disable hardware GPU video encoding, force CPU libx264")
     parser.add_argument("--drape-subsample", type=int, default=6, help="Screen ray marching subsampling factor for 3D terrain (default: 6)")
+    parser.add_argument("--distance-lod", dest="distance_lod", action="store_true", default=True, help="Enable distance-dependent tile Level of Detail (LOD, lower zoom for distant tiles)")
+    parser.add_argument("--no-distance-lod", dest="distance_lod", action="store_false", help="Disable distance-dependent tile Level of Detail (force uniform zoom)")
     args = parser.parse_args()
 
     server = OrionServer(
@@ -544,7 +548,8 @@ if __name__ == "__main__":
         speed=args.speed,
         tile_cache_dir=args.tile_cache_dir,
         gpu_encoding=args.gpu_encoding,
-        drape_subsample=args.drape_subsample
+        drape_subsample=args.drape_subsample,
+        distance_lod=args.distance_lod
     )
 
     try:
