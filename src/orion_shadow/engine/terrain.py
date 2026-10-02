@@ -1,7 +1,10 @@
 import os
 import struct
 import math
+import logging
 from typing import Optional, List, Any
+
+logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
@@ -11,7 +14,7 @@ except ImportError:
 
 class DTEDTile:
     """Represents a single parsed DTED elevation cell."""
-    def __init__(self, file_path: str, lat_min: float, lat_max: float, 
+    def __init__(self, file_path: str, lat_min: float, lat_max: float,
                  lon_min: float, lon_max: float, rows: int, cols: int, grid: Any):
         self.file_path = file_path
         self.lat_min = lat_min
@@ -20,7 +23,18 @@ class DTEDTile:
         self.lon_max = lon_max
         self.rows = rows
         self.cols = cols
-        self.grid = grid
+        # Fix 4a: Pre-cast to float32 once at load time so get_elevations never
+        # pays the np.asarray(dtype=float32) conversion cost at render time
+        # (that call occurred on every one of the 20 ray-march steps per frame).
+        if np is not None:
+            if hasattr(grid, 'dtype') and grid.dtype == np.float32:
+                self.grid = grid
+            elif hasattr(grid, 'shape'):
+                self.grid = np.asarray(grid, dtype=np.float32)
+            else:
+                self.grid = np.array(grid, dtype=np.float32)
+        else:
+            self.grid = grid
 
     def contains(self, lat: float, lon: float) -> bool:
         return self.lat_min <= lat <= self.lat_max and self.lon_min <= lon <= self.lon_max
@@ -31,31 +45,31 @@ class DTEDTile:
         return float(self.grid[r][c])
 
     def get_elevation(self, lat: float, lon: float) -> float:
-        # Clamp input to bounds of this tile
+        # Fix 4b: delegate to the vectorised batch path to avoid Python-level
+        # _get_val() loops and share the same fast NumPy bilinear code.
+        if np is not None:
+            lats = np.array([lat], dtype=np.float32)
+            lons = np.array([lon], dtype=np.float32)
+            return float(self.get_elevations(lats, lons)[0])
+        # Pure-Python fallback (numpy unavailable)
         lat = max(self.lat_min, min(self.lat_max, lat))
         lon = max(self.lon_min, min(self.lon_max, lon))
-
-        # Map Lat/Lon to Grid index
-        row_frac = (lat - self.lat_min) / (self.lat_max - self.lat_min) if self.lat_max != self.lat_min else 0.0
-        col_frac = (lon - self.lon_min) / (self.lon_max - self.lon_min) if self.lon_max != self.lon_min else 0.0
-
+        lat_range = self.lat_max - self.lat_min
+        lon_range = self.lon_max - self.lon_min
+        row_frac = (lat - self.lat_min) / lat_range if lat_range != 0 else 0.0
+        col_frac = (lon - self.lon_min) / lon_range if lon_range != 0 else 0.0
         row = row_frac * (self.rows - 1)
         col = col_frac * (self.cols - 1)
-
-        # Bilinear Interpolation
         r0, c0 = int(math.floor(row)), int(math.floor(col))
         r1, c1 = min(r0 + 1, self.rows - 1), min(c0 + 1, self.cols - 1)
-
         dr = row - r0
         dc = col - c0
-
         v00 = self._get_val(r0, c0)
         v01 = self._get_val(r0, c1)
         v10 = self._get_val(r1, c0)
         v11 = self._get_val(r1, c1)
-
-        res = (1 - dr) * (1 - dc) * v00 + (1 - dr) * dc * v01 + dr * (1 - dc) * v10 + dr * dc * v11
-        return float(res)
+        return float((1 - dr) * (1 - dc) * v00 + (1 - dr) * dc * v01
+                     + dr * (1 - dc) * v10 + dr * dc * v11)
 
     def get_elevations(self, lats: Any, lons: Any) -> Any:
         """Batch elevation interpolation for arrays or lists of coordinates."""
@@ -80,10 +94,8 @@ class DTEDTile:
             dr = row - r0
             dc = col - c0
 
-            if hasattr(self.grid, 'shape'):
-                grid = np.asarray(self.grid, dtype=np.float32)
-            else:
-                grid = np.array(self.grid, dtype=np.float32)
+            # Fix 4a: grid is pre-cast to float32 at construction — no conversion needed here
+            grid = self.grid
 
             v00 = grid[r0, c0]
             v01 = grid[r0, c1]
@@ -108,7 +120,7 @@ class TerrainEngine:
         self.enabled = dted_path is not None
         self.dted_path = dted_path
         self.tiles: List[DTEDTile] = []
-        self.spatial_index: Dict[Tuple[int, int], DTEDTile] = {}
+        self.spatial_index: dict[tuple[int, int], DTEDTile] = {}
         
         # Backwards compatibility attributes
         self.rows = 0
@@ -120,10 +132,10 @@ class TerrainEngine:
         self.grid = None
 
         if self.enabled:
-            print(f"[*] TerrainEngine enabled with path: {self.dted_path}")
+            logger.info("[*] TerrainEngine enabled with path: %s", self.dted_path)
             self._load_dted()
         else:
-            print("[*] TerrainEngine disabled (no DTED path provided)")
+            logger.info("[*] TerrainEngine disabled (no DTED path provided)")
 
     def _parse_dted_coord(self, s: str, is_lat: bool = False) -> float:
         """Parses DTED DMS coordinates (e.g. '1190000W' or '0340000N')."""
@@ -227,12 +239,12 @@ class TerrainEngine:
 
     def _load_dted(self):
         if not os.path.exists(self.dted_path):
-            print(f"[!] DTED path not found: {self.dted_path}")
+            logger.warning("[!] DTED path not found: %s", self.dted_path)
             return
 
         candidates = self._find_dted_files(self.dted_path)
         if not candidates:
-            print(f"[!] No candidate DTED files found in: {self.dted_path}")
+            logger.warning("[!] No candidate DTED files found in: %s", self.dted_path)
             return
 
         for path in candidates:
@@ -241,7 +253,7 @@ class TerrainEngine:
                 self.tiles.append(tile)
 
         if not self.tiles:
-            print(f"[!] No valid DTED files could be loaded from: {self.dted_path}")
+            logger.warning("[!] No valid DTED files could be loaded from: %s", self.dted_path)
             return
 
         # Setup primary reference attributes for backwards compatibility
@@ -264,8 +276,8 @@ class TerrainEngine:
                 for lo in range(lon_start, max(lon_start + 1, lon_end)):
                     self.spatial_index[(la, lo)] = tile
 
-        print(f"[*] Loaded {len(self.tiles)} DTED tile(s) from {self.dted_path} "
-              f"(Lat: [{self.lat_min:.2f}, {self.lat_max:.2f}], Lon: [{self.lon_min:.2f}, {self.lon_max:.2f}])")
+        logger.info("[*] Loaded %d DTED tile(s) from %s (Lat: [%.2f, %.2f], Lon: [%.2f, %.2f])",
+                    len(self.tiles), self.dted_path, self.lat_min, self.lat_max, self.lon_min, self.lon_max)
 
     def get_elevation(self, lat: float, lon: float) -> float:
         if not self.enabled or not self.tiles:

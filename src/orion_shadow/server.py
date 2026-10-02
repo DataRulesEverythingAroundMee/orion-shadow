@@ -4,11 +4,14 @@ import logging
 import struct
 import math
 from typing import List, Optional, Set, Tuple
+from orion_shadow import setup_logging
 from orion_shadow.core.engine import ProtocolEngine
 from orion_shadow.core.protocol import OrionPacket, OrionPktType, UDP_OUT_PORT, UDP_IN_PORT, TCP_PORT
 from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.video_server import VideoServer
+
+logger = logging.getLogger(__name__)
 
 class OrionUDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, server: 'OrionServer'):
@@ -23,11 +26,11 @@ class OrionUDPProtocol(asyncio.DatagramProtocol):
         self.server.handle_datagram(data, addr)
 
     def error_received(self, exc: Exception):
-        print(f"[!] UDP error received: {exc}")
+        logger.error("[UDP] Socket error received: %s", exc)
 
     def connection_lost(self, exc: Optional[Exception]):
         if exc:
-            print(f"[!] UDP connection lost: {exc}")
+            logger.error("[UDP] Socket connection lost: %s", exc)
 
 
 class OrionServer:
@@ -80,14 +83,8 @@ class OrionServer:
         self._running: bool = False
 
         # Logger setup
-        self.logger = logging.getLogger("orion_shadow")
-        numeric_level = getattr(logging, log_level.upper(), logging.WARNING)
-        self.logger.setLevel(numeric_level)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
-            self.logger.addHandler(handler)
-        self.logger.propagate = False
+        setup_logging(log_level)
+        self.logger = logging.getLogger("orion_shadow.server")
         
         # Multicast Video Server
         self.video_server: Optional[VideoServer] = None
@@ -225,9 +222,11 @@ class OrionServer:
 
     def handle_datagram(self, data: bytes, addr: Tuple[str, int]):
         if addr not in self.clients:
-            print("Got datagram")
-            print(f"[*] New connection from {addr}")
+            self.logger.info("[UDP] Registered new client connection from %s:%d", addr[0], addr[1])
             self.clients.add(addr)
+
+        if self.logger.isEnabledFor(logging.DEBUG):
+            self.logger.debug("[UDP] Received datagram of %d bytes from %s:%d", len(data), addr[0], addr[1])
         
         offset = 0
         while offset + 6 <= len(data):
@@ -240,7 +239,7 @@ class OrionServer:
                     try:
                         packet = self.engine.parse(full_packet)
                         if self.logger.isEnabledFor(logging.INFO):
-                            self.logger.info(f"[UDP] Command/Request from {addr}: {self._format_packet_details(packet)}")
+                            self.logger.info("[UDP] Command/Request from %s: %s", addr, self._format_packet_details(packet))
                         response_pkt = None
                         if packet:
                             response_pkt = self.state.update_from_command(packet)
@@ -255,23 +254,27 @@ class OrionServer:
                         # Echo behavior
                         if echo_data and self.transport and not self.transport.is_closing():
                             self.transport.sendto(echo_data, addr)
+                            if self.logger.isEnabledFor(logging.DEBUG):
+                                self.logger.debug("[UDP] Sent echo/response (%d bytes) to %s", len(echo_data), addr)
                             # Also respond on UDP_IN_PORT (8746) if different, for clients expecting discovery reply on UDP_IN_PORT
                             if self.udp_in_port and addr[1] != self.udp_in_port:
                                 try:
                                     self.transport.sendto(echo_data, (addr[0], self.udp_in_port))
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    self.logger.warning("[UDP] Failed to send secondary response to port %d: %s", self.udp_in_port, exc)
                     except Exception as e:
-                        print(f"[!] Error with {addr}: {e}")
+                        self.logger.error("[UDP] Error processing packet from %s: %s", addr, e)
                     offset += pkt_len
                 else:
+                    if self.logger.isEnabledFor(logging.DEBUG):
+                        self.logger.debug("[UDP] Fragmented datagram from %s (offset=%d, needed=%d, got=%d)", addr, offset, pkt_len, len(data))
                     break
             else:
                 offset += 1
 
     async def handle_tcp_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         addr = writer.get_extra_info('peername')
-        print(f"[*] New TCP connection from {addr}")
+        self.logger.info("[TCP] New client connection accepted from %s", addr)
         self.tcp_clients.add(writer)
         buffer = bytearray()
         try:
@@ -280,6 +283,8 @@ class OrionServer:
                 if not chunk:
                     break
                 buffer.extend(chunk)
+                if self.logger.isEnabledFor(logging.DEBUG):
+                    self.logger.debug("[TCP] Received %d bytes from %s (buffer size: %d)", len(chunk), addr, len(buffer))
                 while len(buffer) >= 6:
                     if buffer[0] == 0xD0 and buffer[1] == 0x0D:
                         p_id = buffer[2]
@@ -291,7 +296,7 @@ class OrionServer:
                             try:
                                 packet = self.engine.parse(full_packet)
                                 if self.logger.isEnabledFor(logging.INFO):
-                                    self.logger.info(f"[TCP] Command/Request from {addr}: {self._format_packet_details(packet)}")
+                                    self.logger.info("[TCP] Command/Request from %s: %s", addr, self._format_packet_details(packet))
                                 response_pkt = None
                                 if packet:
                                     response_pkt = self.state.update_from_command(packet)
@@ -302,7 +307,7 @@ class OrionServer:
                                 else:
                                     echo_data = None
                             except Exception as e:
-                                print(f"[!] Error processing TCP packet from {addr}: {e}")
+                                self.logger.error("[TCP] Error processing packet from %s: %s", addr, e)
                                 continue
 
                             if writer.is_closing():
@@ -310,6 +315,8 @@ class OrionServer:
                             if echo_data:
                                 writer.write(echo_data)
                                 await writer.drain()
+                                if self.logger.isEnabledFor(logging.DEBUG):
+                                    self.logger.debug("[TCP] Sent %d bytes to %s", len(echo_data), addr)
                         else:
                             break
                     else:
@@ -317,9 +324,9 @@ class OrionServer:
         except (asyncio.CancelledError, ConnectionError, BrokenPipeError, OSError):
             pass
         except Exception as e:
-            print(f"[!] TCP client {addr} error: {e}")
+            self.logger.error("[TCP] Client %s error: %s", addr, e)
         finally:
-            print(f"[-] Closing TCP connection {addr}")
+            self.logger.info("[TCP] Closing connection from %s", addr)
             self.tcp_clients.discard(writer)
             try:
                 writer.close()
@@ -371,7 +378,7 @@ class OrionServer:
                     except Exception as e:
                         if not self._running:
                             break
-                        print(f"[!] Error sending UDP telemetry to {addr}: {e}")
+                        self.logger.error("[UDP] Error sending telemetry to %s: %s", addr, e)
                         if addr in self.clients:
                             self.clients.remove(addr)
 
@@ -387,7 +394,8 @@ class OrionServer:
                         for p in packets:
                             writer.write(p)
                         await writer.drain()
-                    except Exception:
+                    except Exception as e:
+                        self.logger.warning("[TCP] Error sending telemetry to client, discarding: %s", e)
                         self.tcp_clients.discard(writer)
 
     def close(self):
@@ -429,7 +437,7 @@ class OrionServer:
                 local_addr=(self.host, self.udp_port)
             )
         self.transport = transport
-        print(f"[+] Orion UDP Server active on {self.host}:{self.udp_port} (responses to {self.udp_in_port})")
+        self.logger.info("[+] Orion UDP Server active on %s:%d (responses to %s)", self.host, self.udp_port, self.udp_in_port)
 
         if self.tcp_port is not None:
             try:
@@ -439,11 +447,11 @@ class OrionServer:
                     self.tcp_port,
                     reuse_address=True
                 )
-                print(f"[+] Orion TCP Server active on {self.host}:{self.tcp_port}")
+                self.logger.info("[+] Orion TCP Server active on %s:%d", self.host, self.tcp_port)
             except Exception as e:
-                print(f"[!] Warning: Could not bind TCP server to {self.host}:{self.tcp_port}: {e}")
+                self.logger.warning("[!] Warning: Could not bind TCP server to %s:%d: %s", self.host, self.tcp_port, e)
 
-        print(f"[+] Physics Rate: {1/self.dt:.1f}Hz | Telemetry Rate: {1/self.dt:.1f}Hz")
+        self.logger.info("[+] Physics Rate: %.1fHz | Telemetry Rate: %.1fHz", 1/self.dt, 1/self.dt)
         
         self._tasks = [asyncio.create_task(self.simulation_loop())]
 
@@ -452,10 +460,10 @@ class OrionServer:
         
         if self.video_server:
             if self.video_server.is_3d_terrain_active:
-                print(f"[+] 3D Draped Terrain Visualization active (DTED + Map Tiles)")
+                self.logger.info("[+] 3D Draped Terrain Visualization active (DTED + Map Tiles)")
             elif self.video_server.visualizer:
-                print(f"[*] Flat 2D Map Visualization active (tile-url only)")
-            print(f"[+] Video Stream (Multicast) active on udp://@{self.video_server.multicast_group}:{self.video_server.port}")
+                self.logger.info("[*] Flat 2D Map Visualization active (tile-url only)")
+            self.logger.info("[+] Video Stream (Multicast) active on udp://@%s:%d", self.video_server.multicast_group, self.video_server.port)
             self._tasks.append(asyncio.create_task(self.video_server.start()))
         
         try:
@@ -555,4 +563,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(server.run())
     except KeyboardInterrupt:
-        print("\n[!] Simulator shut down.")
+        server.logger.info("Simulator shut down.")

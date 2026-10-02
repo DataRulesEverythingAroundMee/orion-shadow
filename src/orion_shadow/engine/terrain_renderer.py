@@ -1,7 +1,11 @@
 import math
+import logging
+import concurrent.futures
 from typing import Dict, Any, Optional, Tuple
 
 from orion_shadow.engine.terrain import TerrainEngine
+
+logger = logging.getLogger(__name__)
 
 try:
     import numpy as np
@@ -13,12 +17,46 @@ try:
 except ImportError:
     cv2 = None
 
+# ---------------------------------------------------------------------------
+# Optional GPU backends — both are purely additive; CPU paths remain intact.
+# ---------------------------------------------------------------------------
+
+# CuPy: drop-in NumPy replacement for GPU ray-marching numerics (Fix 3b)
+try:
+    import cupy as cp
+    _CUPY_AVAILABLE = True
+except Exception:
+    cp = None
+    _CUPY_AVAILABLE = False
+
+# OpenCV CUDA modules for GPU remap / resize (Fix 3a)
+try:
+    _CUDA_CV_AVAILABLE = (
+        cv2 is not None
+        and hasattr(cv2, 'cuda')
+        and int(cv2.cuda.getCudaEnabledDeviceCount()) > 0
+    )
+except Exception:
+    _CUDA_CV_AVAILABLE = False
+
+# Shared thread-pool for offloading blocking render work from the asyncio loop
+_render_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="orion_render"
+)
+
 
 class TerrainDraper:
     """
     Renders 3D perspective terrain visualization with draped satellite/map tiles.
     Uses screen-space ray marching against DTED elevation data, inverse texture mapping,
     surface normal hillshading, and 3D mountain horizon skyline compositing.
+
+    Optimizations applied:
+    - Fix 1b: cv2.INTER_LANCZOS4 for terrain remap (quality)
+    - Fix 1c: cv2.INTER_CUBIC for shade/haze upscale (quality)
+    - Fix 2a: Adaptive ray step count based on AGL (accuracy at low altitude)
+    - Fix 3a: cv2.cuda.remap when OpenCV CUDA is available (GPU throughput)
+    - Fix 3b: CuPy ray marching when available (GPU acceleration)
     """
 
     def __init__(self, terrain: TerrainEngine, sub_sample: int = 6):
@@ -28,6 +66,11 @@ class TerrainDraper:
         # Cached grid geometry to avoid reallocations when FOV/resolution don't change
         self._cached_dims: Optional[Tuple[int, int, float, float]] = None
         self._cached_ray_cam: Optional[Any] = None
+
+        logger.info(
+            "Initialized TerrainDraper (sub_sample=%d, CuPy=%s, OpenCV CUDA=%s)",
+            self.sub_sample, _CUPY_AVAILABLE, _CUDA_CV_AVAILABLE
+        )
 
     def _get_camera_rays(self, width: int, height: int, hfov: float, vfov: float) -> Any:
         """Computes and caches normalized camera ray directions in camera frame."""
@@ -142,26 +185,44 @@ class TerrainDraper:
         s_min = max(5.0, agl * 0.15)
         s_max = min(65000.0, max(15000.0, agl * 28.0))
 
-        # 20 geometric sample steps
-        num_steps = 20
-        steps = s_min * ((s_max / s_min) ** (np.arange(num_steps, dtype=np.float32) / (num_steps - 1)))
+        # Fix 2a: Adaptive ray step count based on AGL.
+        # More steps at low altitudes to resolve narrow ridgelines without
+        # over-sampling at cruise altitude where geometry is coarser.
+        if agl < 300.0:
+            num_steps = 32
+        elif agl < 800.0:
+            num_steps = 28
+        else:
+            num_steps = 20
+
+        # Select array backend: CuPy (GPU) when available, NumPy (CPU) otherwise
+        # Fix 3b: CuPy drop-in for the entire ray-marching inner loop
+        if _CUPY_AVAILABLE and cp is not None:
+            xp = cp
+            d_N = cp.asarray(d_N)
+            d_E = cp.asarray(d_E)
+            d_D = cp.asarray(d_D)
+        else:
+            xp = np
+
+        steps = s_min * ((s_max / s_min) ** (xp.arange(num_steps, dtype=xp.float32) / (num_steps - 1)))
 
         cos_lat = max(0.01, math.cos(math.radians(lat0)))
         lat_scale = 1.0 / 111320.0
         lon_scale = 1.0 / (111320.0 * cos_lat)
 
-        hit_mask = np.zeros((gh, gw), dtype=bool)
-        hit_s = np.full((gh, gw), s_max, dtype=np.float32)
-        prev_delta = np.zeros((gh, gw), dtype=np.float32)
-        prev_s = np.full((gh, gw), s_min, dtype=np.float32)
+        hit_mask = xp.zeros((gh, gw), dtype=bool)
+        hit_s = xp.full((gh, gw), s_max, dtype=xp.float32)
+        prev_delta = xp.zeros((gh, gw), dtype=xp.float32)
+        prev_s = xp.full((gh, gw), s_min, dtype=xp.float32)
 
         # Coarse-to-fine ray marching
         for i, s_val in enumerate(steps):
             active = ~hit_mask
-            if not np.any(active):
+            if not xp.any(active):
                 break
 
-            s_act = s_val
+            s_act = float(s_val)
             # Ray altitude at distance s: Alt(s) = alt0 - s * d_D
             ray_alt = alt0 - s_act * d_D[active]
 
@@ -169,8 +230,18 @@ class TerrainDraper:
             s_lat = lat0 + (s_act * d_N[active]) * lat_scale
             s_lon = lon0 + (s_act * d_E[active]) * lon_scale
 
-            # DTED terrain elevation at sample point
-            terr_elev = self.terrain.get_elevations(s_lat, s_lon)
+            # DTED terrain elevation at sample point.
+            # When using CuPy, convert to NumPy for the DTED lookup (which is
+            # CPU-based), then convert result back to the GPU array.
+            if _CUPY_AVAILABLE and cp is not None and xp is cp:
+                terr_elev = cp.asarray(
+                    self.terrain.get_elevations(
+                        cp.asnumpy(s_lat), cp.asnumpy(s_lon)
+                    )
+                )
+            else:
+                terr_elev = self.terrain.get_elevations(s_lat, s_lon)
+
             delta = ray_alt - terr_elev
 
             if i == 0:
@@ -179,30 +250,38 @@ class TerrainDraper:
                 prev_s[active] = s_act
                 # Hits at first step (very close to ground)
                 hit_now = delta <= 0.0
-                if np.any(hit_now):
-                    curr_hit_mask = np.zeros_like(active)
+                if xp.any(hit_now):
+                    curr_hit_mask = xp.zeros_like(active)
                     curr_hit_mask[active] = hit_now
                     hit_mask |= curr_hit_mask
                     hit_s[curr_hit_mask] = s_act
             else:
                 hit_now = (delta <= 0.0) & (prev_delta[active] > 0.0)
-                if np.any(hit_now):
+                if xp.any(hit_now):
                     # Linear interpolation (secant root refinement)
                     p_d = prev_delta[active][hit_now]
                     c_d = delta[hit_now]
                     denom = p_d - c_d
                     denom[denom < 1e-4] = 1e-4
-                    frac = np.clip(p_d / denom, 0.0, 1.0)
+                    frac = xp.clip(p_d / denom, 0.0, 1.0)
                     s_interp = prev_s[active][hit_now] + frac * (s_act - prev_s[active][hit_now])
 
                     # Unpack into full grid
-                    curr_hit_mask = np.zeros_like(active)
+                    curr_hit_mask = xp.zeros_like(active)
                     curr_hit_mask[active] = hit_now
                     hit_mask |= curr_hit_mask
                     hit_s[curr_hit_mask] = s_interp
 
                 prev_delta[active] = delta
                 prev_s[active] = s_act
+
+        # Bring results back to CPU NumPy if we used CuPy
+        if _CUPY_AVAILABLE and cp is not None and xp is cp:
+            hit_mask = cp.asnumpy(hit_mask)
+            hit_s = cp.asnumpy(hit_s)
+            d_N = cp.asnumpy(d_N)
+            d_E = cp.asnumpy(d_E)
+            d_D = cp.asnumpy(d_D)
 
         # Rays that never hit terrain point to the sky
         is_sky = ~hit_mask
@@ -221,9 +300,6 @@ class TerrainDraper:
         canvas_h, canvas_w = ground_texture.shape[:2]
         u_tex = np.clip((hit_tx - min_tx) * float(tile_px), 0.0, float(max(1, canvas_w - 1)))
         v_tex = np.clip((hit_ty - min_ty) * float(tile_px), 0.0, float(max(1, canvas_h - 1)))
-
-        u_tex[is_sky] = -1.0
-        v_tex[is_sky] = -1.0
 
         # --- Fast 3D Hillshading calculation via 3D surface gradient ---
         # 3D coordinates in local meters (E, N, Up)
@@ -270,26 +346,53 @@ class TerrainDraper:
         dot = norm_x * sun_x + norm_y * sun_y + norm_z * sun_z
         shade = np.clip(0.72 + 0.38 * np.maximum(0.0, dot), 0.55, 1.25)
 
-
         # Atmospheric haze blending based on distance s
         haze = np.clip((hit_s - s_min) / (s_max - s_min) * 0.7, 0.0, 0.6)
 
-        # Upscale remap coordinates and shading masks to full target frame resolution
+        # Upscale remap coordinates and shading masks to full target frame resolution.
+        # Fix 1c: Use INTER_CUBIC for continuous scalar fields (shade, haze) so the
+        # hillshading gradient upscales smoothly without the blocky banding that
+        # INTER_LINEAR produces at coarse sub-sample factors.
         map_x = cv2.resize(u_tex.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
         map_y = cv2.resize(v_tex.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
         sky_mask = cv2.resize(is_sky.astype(np.uint8), (width, height), interpolation=cv2.INTER_NEAREST).astype(bool)
-        shade_full = cv2.resize(shade.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)[:, :, np.newaxis]
-        haze_full = cv2.resize(haze.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)[:, :, np.newaxis]
+        shade_full = cv2.resize(shade.astype(np.float32), (width, height),
+                                interpolation=cv2.INTER_CUBIC)[:, :, np.newaxis]
+        haze_full = cv2.resize(haze.astype(np.float32), (width, height),
+                               interpolation=cv2.INTER_CUBIC)[:, :, np.newaxis]
 
-        # Warp ground texture over 3D terrain
-        draped_ground = cv2.remap(
-            ground_texture,
-            map_x,
-            map_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(38, 72, 45)
-        )
+        # Warp ground texture over 3D terrain.
+        # Fix 1b: INTER_LANCZOS4 produces sharper satellite texture with far less
+        # blurring than INTER_LINEAR, at a minor extra CPU cost.
+        # Fix 1b (border): BORDER_REPLICATE avoids the bright-green fringe that
+        # BORDER_CONSTANT creates at the canvas edge during remap.
+        # Fix 3a: Use cv2.cuda.remap when OpenCV was compiled with CUDA support.
+        if _CUDA_CV_AVAILABLE:
+            try:
+                gpu_tex = cv2.cuda_GpuMat()
+                gpu_tex.upload(ground_texture)
+                gpu_mapx = cv2.cuda_GpuMat()
+                gpu_mapx.upload(map_x)
+                gpu_mapy = cv2.cuda_GpuMat()
+                gpu_mapy.upload(map_y)
+                gpu_out = cv2.cuda.remap(gpu_tex, gpu_mapx, gpu_mapy,
+                                         interpolation=cv2.INTER_LINEAR,
+                                         borderMode=cv2.BORDER_REPLICATE)
+                draped_ground = gpu_out.download()
+            except Exception as e:
+                # Fall back to CPU if the CUDA call fails at runtime
+                logger.warning("cv2.cuda.remap failed (%s); falling back to CPU cv2.remap", e)
+                draped_ground = cv2.remap(
+                    ground_texture, map_x, map_y,
+                    interpolation=cv2.INTER_LANCZOS4,
+                    borderMode=cv2.BORDER_REPLICATE,
+                )
+        else:
+            draped_ground = cv2.remap(
+                ground_texture, map_x, map_y,
+                interpolation=cv2.INTER_LANCZOS4,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
 
         # Apply 3D relief hillshading
         draped_shaded = np.clip(draped_ground.astype(np.float32) * shade_full, 0, 255).astype(np.uint8)
@@ -301,6 +404,12 @@ class TerrainDraper:
             0,
             255
         ).astype(np.uint8)
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "3D terrain rendered: %dx%d, sky_pixels=%d, num_steps=%d, AGL=%.1fm",
+                width, height, int(np.sum(sky_mask)), num_steps, agl
+            )
 
         # Composite with sky background:
         # Pixels that cleared mountain peaks show the atmospheric sky gradient

@@ -1,5 +1,8 @@
 import struct
+import logging
 from orion_shadow.core.protocol import OrionPacket, ORION_SYNC0, ORION_SYNC1
+
+logger = logging.getLogger(__name__)
 
 class ProtocolEngine:
     def __init__(self):
@@ -36,11 +39,28 @@ class ProtocolEngine:
 
     def parse(self, raw_data: bytes) -> OrionPacket:
         if len(raw_data) < 6:
+            logger.error("Cannot parse packet: buffer too short (%d bytes, min 6)", len(raw_data))
             raise ValueError("Packet too short")
             
         sync0, sync1, p_id, length = struct.unpack(">BBBB", raw_data[:4])
         if sync0 != ORION_SYNC0 or sync1 != ORION_SYNC1:
+            logger.error(
+                "Invalid sync bytes: 0x%02X 0x%02X (expected 0x%02X 0x%02X)",
+                sync0, sync1, ORION_SYNC0, ORION_SYNC1
+            )
             raise ValueError("Invalid Sync bytes")
             
+        if len(raw_data) < 4 + length:
+            logger.warning(
+                "Packet buffer shorter than declared payload: need %d bytes, got %d",
+                4 + length, len(raw_data)
+            )
+
         data = raw_data[4:4+length]
+        pkt_name = self.packet_id_map.get(p_id)
+        if pkt_name is None:
+            logger.warning("Parsed packet with unknown packet ID: 0x%02X (len=%d)", p_id, length)
+        elif logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Parsed packet %s (0x%02X, len=%d)", pkt_name, p_id, length)
+
         return OrionPacket(p_id, data)

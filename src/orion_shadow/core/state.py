@@ -1,10 +1,13 @@
 import struct
 import math
+import logging
 from typing import Dict, Optional, Tuple
 from orion_shadow.core.protocol import OrionPacket, OrionPktType, OrionMode
 from orion_shadow.engine.physics import PhysicsEngine
 from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.faults import FaultEngine
+
+logger = logging.getLogger(__name__)
 
 class GimbalState:
     def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None, initialized: bool = True,
@@ -150,8 +153,10 @@ class GimbalState:
     def update_from_command(self, packet: OrionPacket) -> Optional[OrionPacket]:
         if packet.packet_id == OrionPktType.INITIALIZE:
             self.initialized = True
+            logger.info("Gimbal initialized via INITIALIZE command (0x00)")
             
         elif packet.packet_id == OrionPktType.RESET:
+            logger.info("Gimbal reset via RESET command (0x04) to initial state")
             self.__init__(dt=self.dt, terrain_engine=self.terrain,
                           lat=self.initial_lat, lon=self.initial_lon, alt=self.initial_alt,
                           pan=self.initial_pan, tilt=self.initial_tilt, heading=self.initial_heading,
@@ -160,12 +165,15 @@ class GimbalState:
             
         elif packet.packet_id == OrionPktType.STARTUP_CMD:
             self.initialized = True
+            logger.info("Gimbal initialized via STARTUP_CMD command (0x07)")
             
         elif packet.packet_id == OrionPktType.CMD:
             if len(packet.data) == 8:
                 pan, tilt = struct.unpack(">ff", packet.data[:8])
                 self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
                 self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug("CMD (8-byte float) target: pan=%.2f, tilt=%.2f", self.target_pan, self.target_tilt)
             elif len(packet.data) >= 4:
                 pan_raw, tilt_raw = struct.unpack_from(">hh", packet.data, 0)
                 # Mode byte is at offset 4 for standard OrionCmd_t and OrionCmdExtended_t
@@ -175,7 +183,10 @@ class GimbalState:
                     # Legacy 4-byte payload without mode byte (treat as position mode)
                     mode = 0x50
 
+                old_mode = self.mode
                 self.mode = mode
+                if old_mode != mode:
+                    logger.info("Gimbal operational mode changed: 0x%02X -> 0x%02X", old_mode, mode)
 
                 # Rate modes: ORION_MODE_RATE (0x10), ORION_MODE_GEO_RATE (0x11), ORION_MODE_SCENE (0x30)
                 if mode in (0x10, 0x11, 0x30):
@@ -196,23 +207,36 @@ class GimbalState:
                         new_tilt = self.target_tilt + tilt_rate * dt
                         self.target_tilt = max(min(new_tilt, self.tilt_max), self.tilt_min)
 
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "CMD Rate mode 0x%02X: rates (pan=%.2f, tilt=%.2f deg/s) -> targets (pan=%.2f, tilt=%.2f)",
+                            mode, pan_rate, tilt_rate, self.target_pan, self.target_tilt
+                        )
+
                 # Position modes: ORION_MODE_POSITION (0x50), ORION_MODE_POSITION_NO_LIMITS (0x51)
                 elif mode in (0x50, 0x51):
                     pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
                     self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
                     self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Position mode 0x%02X: targets (pan=%.2f, tilt=%.2f)", mode, self.target_pan, self.target_tilt)
 
                 elif mode == 0x71:  # ORION_MODE_DOWN
                     self.target_tilt = self.tilt_min
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Down mode: target_tilt=%.2f", self.target_tilt)
 
                 # If extended command (len >= 10), return OrionCmdExtendedResponse
                 if len(packet.data) >= 10:
                     return self.get_cmd_extended_response_packet(packet.data)
+            else:
+                logger.warning("CMD packet data too short: %d bytes (minimum 4)", len(packet.data))
         
         elif packet.packet_id == OrionPktType.CAMERA_SWITCH:
             if len(packet.data) >= 1:
                 self.camera_id = packet.data[0]
                 self.camera_ready = False
+                logger.info("Switched active camera to index %d", self.camera_id)
             
         elif packet.packet_id in (OrionPktType.CAMERA_CMD, OrionPktType.CAMERA_STATE):
             if len(packet.data) >= 2 and len(packet.data) < 8:
@@ -238,11 +262,17 @@ class GimbalState:
                 if focus >= 0.0:
                     self.camera_focus = focus
                 self.camera_ready = True
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Camera state cmd: zoom=%.2fx, focus=%.2f, cam_id=%d, ready=%s",
+                    self.camera_zoom, self.camera_focus, self.camera_id, self.camera_ready
+                )
             return self.get_camera_state_packet()
         
         elif packet.packet_id == OrionPktType.LASER_CMD:
             if len(packet.data) >= 4:
                 self.laser_power = max(0.0, min(1.0, struct.unpack(">f", packet.data[:4])[0]))
+                logger.info("Laser power set to %.2f (%.1f%%)", self.laser_power, self.laser_power * 100.0)
 
         elif packet.packet_id == OrionPktType.LASER_STATES:
             return self.get_laser_state_packet()
@@ -250,6 +280,7 @@ class GimbalState:
         elif packet.packet_id == OrionPktType.UART_CONFIG:
             if len(packet.data) >= 4:
                 self.baud_rate = struct.unpack(">I", packet.data[:4])[0]
+                logger.info("UART baud rate configured to %d", self.baud_rate)
 
         elif packet.packet_id == OrionPktType.LIMITS:
             if len(packet.data) == 8:
@@ -259,10 +290,12 @@ class GimbalState:
                 self.tilt_max = self.tilt_limit
                 self.tilt_min = -self.tilt_limit
                 self.pan_continuous = False
+                logger.info("Gimbal limits updated: pan=±%.1f deg, tilt=±%.1f deg", self.pan_limit, self.tilt_limit)
             return self.get_limits_packet()
 
         elif packet.packet_id == OrionPktType.GPS_DATA:
             if not self.is_faulty:
+                was_gps = self.gps_received
                 self.gps_received = True
                 new_lat, new_lon, new_alt = None, None, None
                 explicit_speed = False
@@ -306,6 +339,10 @@ class GimbalState:
                     self.gps_lat = new_lat
                     self.gps_lon = new_lon
                     self.gps_alt = new_alt
+                    if not was_gps:
+                        logger.info("GPS fix acquired: lat=%.6f, lon=%.6f, alt=%.1fm", new_lat, new_lon, new_alt)
+                    elif logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("GPS update: lat=%.6f, lon=%.6f, alt=%.1fm, spd=%.1f kts", new_lat, new_lon, new_alt, self.aircraft_speed)
 
         elif packet.packet_id == OrionPktType.EXT_HEADING_DATA:
             if len(packet.data) >= 8 and len(packet.data) < 12:
@@ -316,6 +353,8 @@ class GimbalState:
                 self.aircraft_pitch = math.degrees(raw_pitch / 10430.06004058)
             elif len(packet.data) >= 12:
                 self.aircraft_heading, self.aircraft_roll, self.aircraft_pitch = struct.unpack(">fff", packet.data[:12])
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Ext heading: hdg=%.1f deg, pitch=%.1f deg, roll=%.1f deg", self.aircraft_heading, self.aircraft_pitch, self.aircraft_roll)
 
         elif packet.packet_id == OrionPktType.NETWORK_VIDEO:
             if len(packet.data) >= 6:
@@ -412,6 +451,10 @@ class GimbalState:
                 target_pan, target_tilt = self.calculate_geopoint_pan_tilt()
                 self.target_pan = target_pan
                 self.target_tilt = target_tilt
+                logger.info(
+                    "Geopoint target set: lat=%.6f, lon=%.6f, alt=%.1fm -> targets (pan=%.2f, tilt=%.2f)",
+                    self.geopoint_lat, self.geopoint_lon, self.geopoint_alt, target_pan, target_tilt
+                )
 
                 # If closure mode requested (options bit 1 set), immediately achieve pointing
                 if options & 0x02:

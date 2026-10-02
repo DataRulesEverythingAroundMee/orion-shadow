@@ -66,6 +66,10 @@ class OrionMode:
     PATH = 0x70
     DOWN = 0x71
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 def compute_checksum(data: bytes) -> tuple:
     """Compute Fletcher's checksum (mod 251) matching Orion SDK TrilliumPacket.c."""
     if len(data) == 0:
@@ -83,9 +87,18 @@ def compute_checksum(data: bytes) -> tuple:
 def verify_checksum(packet: bytes) -> bool:
     """Verify packet checksum."""
     if len(packet) < 6:
+        logger.warning("Packet buffer too short for checksum verification: %d bytes (min 6)", len(packet))
         return False
     a, b = compute_checksum(packet[:-2])
-    return packet[-2] == a and packet[-1] == b
+    match = (packet[-2] == a and packet[-1] == b)
+    if not match:
+        logger.warning(
+            "Packet checksum mismatch: expected (0x%02X, 0x%02X), got (0x%02X, 0x%02X) [len=%d]",
+            a, b, packet[-2], packet[-1], len(packet)
+        )
+    elif logger.isEnabledFor(logging.DEBUG):
+        logger.debug("Packet checksum verified OK: (0x%02X, 0x%02X)", a, b)
+    return match
 
 
 @dataclass
@@ -97,4 +110,10 @@ class OrionPacket:
         length = len(self.data)
         payload = struct.pack(">BBBB", ORION_SYNC0, ORION_SYNC1, self.packet_id, length) + self.data
         a, b = compute_checksum(payload)
-        return payload + bytes([a, b])
+        encoded = payload + bytes([a, b])
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Encoded packet 0x%02X (data_len=%d, frame_len=%d)",
+                self.packet_id, length, len(encoded)
+            )
+        return encoded

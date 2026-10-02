@@ -1,5 +1,8 @@
 import math
+import logging
 from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 class PhysicsEngine:
     """Simulates gimbal dynamics: inertia, velocity, and acceleration."""
@@ -17,6 +20,11 @@ class PhysicsEngine:
     def step(self, target_pan: float, target_tilt: float, continuous_pan: bool = True,
              tilt_min: float = -80.0, tilt_max: float = 28.0):
         """Integrates physics one timestep forward."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Physics step: targets (pan=%.2f, tilt=%.2f) | current (pan=%.2f, tilt=%.2f) | vel (%.2f, %.2f)",
+                target_pan, target_tilt, self.pan["pos"], self.tilt["pos"], self.pan["vel"], self.tilt["vel"]
+            )
         self._update_axis(self.pan, target_pan, continuous=continuous_pan)
         self._update_axis(self.tilt, target_tilt, continuous=False, min_limit=tilt_min, max_limit=tilt_max)
 

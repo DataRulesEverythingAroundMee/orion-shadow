@@ -10,7 +10,19 @@ description = "Orion Gimbal & Camera Simulator for SIL/HIL testing (targeting Or
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
-    "asyncio",
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "aiohttp>=3.9.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    # Replace 'cuda13x' with your installed CUDA version (cuda11x, cuda12x, etc.)
+    "cupy-cuda13x>=13.0.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
 ]
 
 [tool.setuptools]

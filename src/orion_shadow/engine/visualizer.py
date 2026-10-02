@@ -1,9 +1,12 @@
 import math
+import logging
 try:
     import numpy as np
 except ImportError:
     np = None
 from typing import Tuple, List, Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class TileVisualizer:
@@ -193,17 +196,24 @@ class TileVisualizer:
             or None if alt <= 0 or zoom is out of range.
         """
         if alt <= 0:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Footprint rejected: altitude <= 0 (alt=%.1fm)", alt)
             return None
         if not (self.zoom_min <= zoom <= self.zoom_max):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Footprint rejected: zoom %d not in [%d, %d]", zoom, self.zoom_min, self.zoom_max)
             return None
 
         rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov)
 
-        limit_range = max(65000.0, float(max_ground_range or 65000.0))
+        limit_range = float(max_ground_range) if max_ground_range else 65000.0
+        limit_range = max(1000.0, min(65000.0, limit_range))
 
         # Check near-ground visibility from bottom rays
         # If both bottom rays point into the sky or horizontal, no ground is visible
         if rays[2][2] <= 1e-5 and rays[3][2] <= 1e-5:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Footprint rejected: bottom rays point above horizon (cam_pitch=%.1f deg)", cam_pitch)
             return None
 
         # Nearest ground distance along bottom rays
@@ -211,6 +221,8 @@ class TileVisualizer:
         d_near = alt / min_dep
         if d_near > limit_range:
             # Nearest visible ground is beyond realistic visual range
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Footprint rejected: near ground distance %.1fm > limit_range %.1fm", d_near, limit_range)
             return None
 
         cos_lat = math.cos(math.radians(lat))
@@ -284,6 +296,8 @@ class TileVisualizer:
         quad = [c[0], c[1], c[3], c[2]]
         area = 0.5 * abs(sum(quad[i][0] * quad[(i + 1) % 4][1] - quad[(i + 1) % 4][0] * quad[i][1] for i in range(4)))
         if area < 1e-6:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Footprint rejected: degenerate quadrilateral polygon (area=%.4e)", area)
             return None
 
         max_tile_idx = 2 ** zoom - 1
@@ -321,7 +335,15 @@ class TileVisualizer:
                     slant_dist = math.sqrt(dn * dn + de * de + alt * alt)
 
                     ratio = slant_dist / ref_dist
-                    drop = min(2, max(0, int(math.floor(math.log2(ratio))))) if ratio >= 1.0 else 0
+                    # Keep full resolution across the primary camera field of view:
+                    # Only drop 1 level when distance is > 2.8x near distance (well beyond boresight)
+                    # and 2 levels when distance is > 5.5x near distance (far horizon)
+                    if ratio < 2.8:
+                        drop = 0
+                    elif ratio < 5.5:
+                        drop = 1
+                    else:
+                        drop = 2
                     z_lod = max(min_zoom, zoom - drop)
 
                     dz = zoom - z_lod
@@ -344,6 +366,12 @@ class TileVisualizer:
                     return (tz, dist_sq)
                 tiles.sort(key=tile_priority)
                 tiles = tiles[:max_tiles]
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "Footprint calculated: %d tiles, bounds=(%d, %d, %d, %d), zoom=%d, d_near=%.1fm",
+                len(tiles), min_tx, min_ty, max_tx, max_ty, zoom, d_near
+            )
 
         return {
             'corners_latlon': corners_latlon,

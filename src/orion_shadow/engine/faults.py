@@ -1,5 +1,8 @@
 import struct
+import logging
 from typing import List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 class FaultEngine:
     def __init__(self):
@@ -10,13 +13,21 @@ class FaultEngine:
         Adds a fault to the active list.
         fault_type: 'motor_overcurrent', 'sensor_timeout', 'comms_loss'
         """
+        mapping = {'motor_overcurrent', 'sensor_timeout', 'comms_loss'}
+        if fault_type not in mapping:
+            logger.warning("Injecting unrecognized fault type '%s'", fault_type)
+        else:
+            logger.info("Fault injected: '%s' (severity=%.2f)", fault_type, severity)
+
         self.active_faults.append({
             'type': fault_type,
             'severity': severity
         })
 
     def clear_faults(self):
+        count = len(self.active_faults)
         self.active_faults.clear()
+        logger.info("Cleared all active faults (%d fault(s) removed)", count)
 
     def get_active_fault_ids(self) -> List[int]:
         """
@@ -27,10 +38,16 @@ class FaultEngine:
             'sensor_timeout': 2,
             'comms_loss': 3
         }
-        return [mapping[f['type']] for f in self.active_faults if f['type'] in mapping]
+        ids = [mapping[f['type']] for f in self.active_faults if f['type'] in mapping]
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Active fault IDs resolved: %s", ids)
+        return ids
 
     def apply_faults(self, state: Any):
         """Modifies the gimbal state based on active faults."""
+        if self.active_faults and logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Applying %d active faults to gimbal state", len(self.active_faults))
+
         for fault in self.active_faults:
             if fault['type'] == 'motor_overcurrent':
                 # Simulate a jitter/instability in position

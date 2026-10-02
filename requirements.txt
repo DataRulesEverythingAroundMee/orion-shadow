@@ -1,0 +1,21 @@
+# Orion Shadow — Python Requirements
+# Install with: pip install -r requirements.txt
+#
+# Core runtime (required)
+numpy>=1.24.0
+opencv-python>=4.8.0       # cv2 — rendering, tile stitching, HUD, warpPerspective
+aiohttp>=3.9.0             # async HTTP for tile fetching
+
+# Optional — GPU acceleration
+cupy-cuda13x>=13.0.0     # CuPy drop-in NumPy replacement for GPU ray marching
+#                          # Replace 'cuda13x' with your CUDA version (e.g. cuda12x)
+#                          # Check with: nvcc --version
+#
+# Optional — CUDA-enabled OpenCV (for cv2.cuda.remap etc.)
+# Requires building OpenCV from source with -DWITH_CUDA=ON, or:
+# pip install opencv-contrib-python  (CPU only, no cuda modules)
+# For GPU remap: use the CUDA-compiled wheel matching your CUDA toolkit version
+
+# Development / testing
+pytest>=7.4.0
+pytest-asyncio>=0.23.0

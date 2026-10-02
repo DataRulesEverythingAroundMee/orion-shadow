@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 import os
 import shutil
@@ -12,6 +13,8 @@ from orion_shadow.core.state import GimbalState
 from orion_shadow.engine.visualizer import TileVisualizer
 from orion_shadow.engine.terrain import TerrainEngine
 from orion_shadow.engine.terrain_renderer import TerrainDraper
+
+logger = logging.getLogger(__name__)
 
 
 try:
@@ -106,9 +109,14 @@ class VideoServer:
         # Pre-allocated output frame buffer (avoids allocation every frame)
         self._frame_buf: Optional[Any] = None
 
+        # Fallback cache: stores temporary upscaled parent/child tiles for immediate frame rendering
+        # without poisoning self.tile_cache (which is reserved exclusively for authentic high-res tiles)
+        self._fallback_cache: Dict[Tuple[int, int, int], Any] = {}
+
         # Composite cache: avoids re-stitching and re-warping when the
         # camera hasn't moved enough to change the visible tile set
         self._cached_tile_keys: Optional[frozenset] = None
+        self._cached_tile_sig: Optional[Tuple] = None
         self._cached_ground: Optional[Any] = None
         self._cached_tile_px: int = 0
         self._cached_tile_bounds: Optional[Tuple[int, int, int, int]] = None
@@ -165,6 +173,30 @@ class VideoServer:
                 return p
         return candidates[0] if candidates else None
 
+    def _purge_resized_cache(self, z: int, x: int, y: int) -> None:
+        """Removes all resized variants of tile (z, x, y) from the resize cache.
+        Must be called whenever an authentic tile replaces a fallback so that the
+        next canvas rebuild does NOT reuse the stale blurry resized fallback image.
+        """
+        tile_key = (z, x, y)
+        stale = [rk for rk in self._resized_cache if rk[0] == tile_key]
+        for rk in stale:
+            del self._resized_cache[rk]
+
+    def _evict_tile_cache(self) -> None:
+        """Evicts one entry from tile_cache using zoom-priority ordering.
+        Lowest-zoom tiles (coarsest, most easily replaced) are evicted first.
+        This preserves the high-zoom near-nadir tiles that are the hardest to refetch
+        and are responsible for the sharp detail at the bottom of the camera view.
+        """
+        if not self.tile_cache:
+            return
+        # Find the key with the smallest zoom level to evict
+        victim = min(self.tile_cache.keys(), key=lambda k: k[0])
+        self.tile_cache.pop(victim, None)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Evicted tile %s from memory cache (remaining: %d)", victim, len(self.tile_cache))
+
     def _load_tile_from_disk(self, z: int, x: int, y: int) -> Optional[Any]:
         """Loads a tile from local disk cache into memory if present."""
         disk_path = self._get_tile_disk_path(z, x, y)
@@ -172,12 +204,16 @@ class VideoServer:
             try:
                 img = cv2.imread(disk_path, cv2.IMREAD_COLOR)
                 if img is not None:
-                    if len(self.tile_cache) > 2048:
-                        self.tile_cache.pop(next(iter(self.tile_cache)))
+                    if len(self.tile_cache) > 4096:
+                        self._evict_tile_cache()
                     self.tile_cache[(z, x, y)] = img
+                    self._fallback_cache.pop((z, x, y), None)
+                    self._purge_resized_cache(z, x, y)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Loaded tile (%d, %d, %d) from disk cache: %s", z, x, y, disk_path)
                     return img
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Error reading tile (%d, %d, %d) from disk cache %s: %s", z, x, y, disk_path, e)
         return None
 
     def _detect_local_ip(self) -> str:
@@ -227,17 +263,23 @@ class VideoServer:
                                 os.makedirs(os.path.dirname(disk_path), exist_ok=True)
                                 with open(disk_path, "wb") as f:
                                     f.write(content)
-                            except Exception:
-                                pass
+                            except Exception as exc:
+                                logger.warning("Could not write tile (%d, %d, %d) to disk cache %s: %s", z, x, y, disk_path, exc)
 
                         nparr = np.frombuffer(content, np.uint8)
                         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                         if img is not None:
-                            if len(self.tile_cache) > 2048:
-                                self.tile_cache.pop(next(iter(self.tile_cache)))
+                            if len(self.tile_cache) > 4096:
+                                self._evict_tile_cache()
                             self.tile_cache[cache_key] = img
-        except Exception:
-            pass
+                            self._fallback_cache.pop(cache_key, None)
+                            self._purge_resized_cache(*cache_key)
+                            if logger.isEnabledFor(logging.DEBUG):
+                                logger.debug("Fetched and cached tile (%d, %d, %d) [bytes=%d]", z, x, y, len(content))
+                    else:
+                        logger.warning("Failed to fetch tile (%d, %d, %d): HTTP %d", z, x, y, response.status)
+        except Exception as e:
+            logger.error("Error fetching tile (%d, %d, %d): %s", z, x, y, e)
         finally:
             self._pending_tile_fetches.discard(cache_key)
 
@@ -252,24 +294,26 @@ class VideoServer:
         await self._fetch_tile_worker(z, x, y)
         return self.tile_cache.get(cache_key)
 
-    def _get_tile_or_parent(self, z: int, x: int, y: int) -> Optional[Any]:
-        """
-        Retrieves tile (z, x, y) from memory or local disk cache. If not present, checks lower zoom level parent
-        tiles in memory and on disk and extracts the scaled sub-region so imagery is never pitch black.
-        """
-        # 1. Check in-memory cache
-        if (z, x, y) in self.tile_cache:
-            return self.tile_cache[(z, x, y)]
+    def _tile_exists_on_disk(self, z: int, x: int, y: int) -> bool:
+        """Returns True if the genuine tile file exists in local disk cache."""
+        disk_path = self._get_tile_disk_path(z, x, y)
+        return disk_path is not None and os.path.isfile(disk_path)
 
-        # 2. Check local disk cache
-        disk_img = self._load_tile_from_disk(z, x, y)
-        if disk_img is not None:
-            return disk_img
+    def _get_parent_fallback(self, z: int, x: int, y: int) -> Optional[Any]:
+        """
+        Synthesizes a temporary fallback image from parent (or child) tiles
+        for the current frame when the genuine tile (z, x, y) is not yet available.
+        CRITICAL: Never stores into self.tile_cache[(z, x, y)] and never writes to disk,
+        so it never suppresses fetching the real high-resolution tile!
+        """
+        if (z, x, y) in self._fallback_cache:
+            return self._fallback_cache[(z, x, y)]
 
         if cv2 is None or np is None:
             return None
 
-        # 3. Check up to 5 zoom levels up for an available parent tile in memory or on disk
+        # Check up to 5 zoom levels up for an available parent tile in memory or on disk
+        # Prefer the closest (highest-zoom) parent to minimise upscaling blur.
         min_z = max(1, z - 5)
         for pz in range(z - 1, min_z - 1, -1):
             dz = z - pz
@@ -291,13 +335,16 @@ class VideoServer:
                 y1 = max(y0 + 1, int(round(sub_y + sub_h)))
                 cropped = parent_img[y0:y1, x0:x1]
                 if cropped.size > 0:
-                    stitched = cv2.resize(cropped, (pw, ph), interpolation=cv2.INTER_LINEAR)
-                    if len(self.tile_cache) > 2048:
-                        self.tile_cache.pop(next(iter(self.tile_cache)))
-                    self.tile_cache[(z, x, y)] = stitched
+                    # Use INTER_LANCZOS4 for large upscales (dz >= 3 means 8× or more)
+                    # to minimise blurring on the temporary fallback image.
+                    interp = cv2.INTER_LANCZOS4 if dz >= 3 else cv2.INTER_CUBIC
+                    stitched = cv2.resize(cropped, (pw, ph), interpolation=interp)
+                    if len(self._fallback_cache) > 1024:
+                        self._fallback_cache.pop(next(iter(self._fallback_cache)))
+                    self._fallback_cache[(z, x, y)] = stitched
                     return stitched
 
-        # 4. Check child / grandchild tiles (finer zoom, e.g. synthesize Z13 or Z12 from Z14)
+        # Check child / grandchild tiles (finer zoom)
         for cz in (z + 1, z + 2):
             if cz > self.max_tile_zoom:
                 break
@@ -330,21 +377,29 @@ class VideoServer:
                     composite[dy * ch:(dy + 1) * ch, dx * cw:(dx + 1) * cw] = c_img
 
                 stitched = cv2.resize(composite, (cw, ch), interpolation=cv2.INTER_AREA)
-                if len(self.tile_cache) > 2048:
-                    self.tile_cache.pop(next(iter(self.tile_cache)))
-                self.tile_cache[(z, x, y)] = stitched
-
-                # Persist synthesized tile to disk cache so it is available immediately next time
-                disk_path = self._get_tile_disk_path(z, x, y)
-                if disk_path:
-                    try:
-                        os.makedirs(os.path.dirname(disk_path), exist_ok=True)
-                        cv2.imwrite(disk_path, stitched)
-                    except Exception:
-                        pass
+                if len(self._fallback_cache) > 1024:
+                    self._fallback_cache.pop(next(iter(self._fallback_cache)))
+                self._fallback_cache[(z, x, y)] = stitched
                 return stitched
 
         return None
+
+    def _get_tile_or_parent(self, z: int, x: int, y: int) -> Optional[Any]:
+        """
+        Retrieves tile (z, x, y) from memory or local disk cache. If not present, checks lower zoom level parent
+        tiles in memory and on disk and extracts the scaled sub-region so imagery is never pitch black.
+        """
+        # 1. Check in-memory cache for authentic tile
+        if (z, x, y) in self.tile_cache:
+            return self.tile_cache[(z, x, y)]
+
+        # 2. Check local disk cache
+        disk_img = self._load_tile_from_disk(z, x, y)
+        if disk_img is not None:
+            return disk_img
+
+        # 3. Use temporary fallback (does NOT poison self.tile_cache)
+        return self._get_parent_fallback(z, x, y)
 
 
     async def _prefetch_loop(self):
@@ -391,11 +446,11 @@ class VideoServer:
                     distance_lod=self.distance_lod
                 )
 
-                # Filter for tiles not yet in cache or pending (resolving from disk / hierarchy first)
+                # Filter for authentic tiles not yet in cache or pending or on disk
                 to_prefetch = []
                 for t in future_tiles:
                     if t not in self.tile_cache and t not in self._pending_tile_fetches:
-                        if self._get_tile_or_parent(*t) is None:
+                        if not self._tile_exists_on_disk(*t):
                             to_prefetch.append(t)
 
                 # Queue background downloads in manageable batches
@@ -487,7 +542,8 @@ class VideoServer:
         cos_lat = math.cos(math.radians(lat))
         if output_gsd > 0:
             z = math.log2(EARTH_CIRCUMFERENCE * cos_lat / (256.0 * output_gsd))
-            z = int(math.floor(z))
+            # Fix: round(z) ensures the ground sample distance matches the sensor without under-sampling
+            z = int(round(z))
         else:
             z = self.max_tile_zoom
         return max(14, min(self.max_tile_zoom, z))
@@ -757,11 +813,20 @@ class VideoServer:
             tile_results = {}
             missing_tiles = []
             for t in tiles_to_fetch:
-                img = self._get_tile_or_parent(*t)
+                img = self.tile_cache.get(t)
+                if img is None:
+                    img = self._load_tile_from_disk(*t)
+
                 if img is not None:
                     tile_results[t] = img
-                if t not in self.tile_cache and t not in self._pending_tile_fetches:
-                    missing_tiles.append(t)
+                else:
+                    # Missing authentic tile: use temporary fallback for this frame
+                    # while immediately queueing fetch for the real tile!
+                    fallback_img = self._get_parent_fallback(*t)
+                    if fallback_img is not None:
+                        tile_results[t] = fallback_img
+                    if t not in self._pending_tile_fetches:
+                        missing_tiles.append(t)
 
             # Trigger background asynchronous fetch for missing tiles
             if missing_tiles and self.session is not None and not self.session.closed:
@@ -776,19 +841,25 @@ class VideoServer:
                 n_cols = max_tx - min_tx + 1
                 n_rows = max_ty - min_ty + 1
 
-                # Dynamically size tile_px so the ground canvas stays under 2048px while preserving high resolution.
+                # Dynamically size tile_px with high-resolution canvas (up to 4096px).
+                # Keep tile_px at native 256px whenever possible, floor at 128px to eliminate blur
                 max_dim = max(n_cols, n_rows)
-                target_canvas_dim = 2048
-                tile_px = max(32, min(256, int(target_canvas_dim / max(1, max_dim))))
+                target_canvas_dim = 4096
+                tile_px = max(128, min(256, int(target_canvas_dim / max(1, max_dim))))
 
-                # Check if tile set changed since last frame
+                # Check if tile set OR tile contents changed since last frame.
+                # Tracking object id(v) ensures that the instant an authentic high-res tile
+                # replaces a temporary fallback, tiles_changed triggers a re-stitch immediately!
                 current_tile_keys = frozenset(
                     k for k, v in tile_results.items() if v is not None
+                )
+                current_tile_sig = tuple(
+                    (k, id(v)) for k, v in sorted(tile_results.items()) if v is not None
                 )
                 corners_frac = footprint['corners_tile_frac']
                 tile_bounds = footprint['tile_bounds']
 
-                tiles_changed = (current_tile_keys != self._cached_tile_keys
+                tiles_changed = (current_tile_sig != self._cached_tile_sig
                                  or tile_bounds != self._cached_tile_bounds
                                  or tile_px != self._cached_tile_px)
 
@@ -854,12 +925,23 @@ class VideoServer:
                         if sub_img.shape[0] == target_h and sub_img.shape[1] == target_w:
                             resized = sub_img
                         else:
-                            rk = ((z, tx, ty), target_w, target_h)
+                            # KEY includes id(sub_img) so a changed source image (fallback→authentic
+                            # or reload from disk) always produces a fresh resize rather than reusing
+                            # the stale blurry resized fallback. This is the primary fix for the
+                            # "briefly clear then back to blurry" flicker at the bottom of the frame.
+                            rk = ((z, tx, ty), target_w, target_h, id(sub_img))
                             if rk in self._resized_cache:
                                 resized = self._resized_cache[rk]
                             else:
-                                resized = cv2.resize(sub_img, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-                                if len(self._resized_cache) > 2048:
+                                # Adaptive interpolation — INTER_AREA prevents aliasing when
+                                # downscaling a high-res tile; INTER_CUBIC is smoother when upscaling.
+                                src_h, src_w = sub_img.shape[:2]
+                                if target_w < src_w or target_h < src_h:
+                                    interp = cv2.INTER_AREA
+                                else:
+                                    interp = cv2.INTER_CUBIC
+                                resized = cv2.resize(sub_img, (target_w, target_h), interpolation=interp)
+                                if len(self._resized_cache) > 4096:
                                     self._resized_cache.pop(next(iter(self._resized_cache)))
                                 self._resized_cache[rk] = resized
 
@@ -867,6 +949,7 @@ class VideoServer:
 
                     self._cached_ground = ground
                     self._cached_tile_keys = current_tile_keys
+                    self._cached_tile_sig = current_tile_sig
                     self._cached_tile_px = tile_px
                     self._cached_tile_bounds = tile_bounds
 
@@ -877,10 +960,13 @@ class VideoServer:
 
                     if self.terrain_draper is not None:
                         telem_key = (
-                            round(telem['lat'], 4),
-                            round(telem['lon'], 4),
-                            round(telem['alt'], 1),
-                            round(telem['cam_hdg'], 1),
+                            # Fix 5a: tighter rounding so the terrain frame cache is
+                            # properly invalidated on small movements at low AGL / high zoom.
+                            # lat/lon: 5 decimal places ≈ 1 m; alt: 1 m; heading: 1°.
+                            round(telem['lat'], 5),
+                            round(telem['lon'], 5),
+                            round(telem['alt'], 0),
+                            round(telem['cam_hdg'], 0),
                             round(telem['cam_pitch'], 1),
                             round(telem.get('cam_roll', 0.0), 1),
                             round(telem['zoom'], 2)
@@ -888,17 +974,34 @@ class VideoServer:
                         if tiles_changed or self._cached_telem_key != telem_key or self._cached_warped_frame is None:
                             try:
                                 base_sky = self._generate_synthetic_background()
-                                draped_frame = self.terrain_draper.render(
-                                    ground_texture=self._cached_ground,
-                                    tile_bounds=footprint['tile_bounds'],
-                                    tile_px=tile_px,
-                                    zoom=zoom,
-                                    telem=telem,
-                                    width=self.width,
-                                    height=self.height,
-                                    hfov=hfov,
-                                    vfov=vfov,
-                                    base_sky_frame=base_sky
+                                # Fix 2c: run the blocking ray-march + remap in a thread so the
+                                # asyncio event loop stays free for tile fetches and telemetry.
+                                loop = asyncio.get_running_loop()
+                                from orion_shadow.engine.terrain_renderer import _render_executor
+                                _cached_ground_snap = self._cached_ground
+                                _fp_tile_bounds = footprint['tile_bounds']
+                                _tile_px = tile_px
+                                _zoom = zoom
+                                _telem = telem
+                                _width = self.width
+                                _height = self.height
+                                _hfov = hfov
+                                _vfov = vfov
+                                _draper = self.terrain_draper
+                                draped_frame = await loop.run_in_executor(
+                                    _render_executor,
+                                    lambda: _draper.render(
+                                        ground_texture=_cached_ground_snap,
+                                        tile_bounds=_fp_tile_bounds,
+                                        tile_px=_tile_px,
+                                        zoom=_zoom,
+                                        telem=_telem,
+                                        width=_width,
+                                        height=_height,
+                                        hfov=_hfov,
+                                        vfov=_vfov,
+                                        base_sky_frame=base_sky
+                                    )
                                 )
                                 if draped_frame is not None:
                                     self._cached_warped_frame = draped_frame
@@ -1015,8 +1118,15 @@ class VideoServer:
                 "-r", str(self.fps),
                 "-i", "pipe:0",
                 "-c:v", "h264_nvenc",
-                "-preset", "p1",
-                "-tune", "ull",
+                # Fix 3d: p4 (balanced) instead of p1 (lowest quality).
+                # hq tune: better quality at slightly higher encode cost — still GPU-bound.
+                # CBR at 4 Mbps gives consistent quality without bitrate spikes.
+                "-preset", "p4",
+                "-tune", "hq",
+                "-rc", "cbr",
+                "-b:v", "4M",
+                "-maxrate", "6M",
+                "-bufsize", "8M",
                 "-zerolatency", "1",
                 "-pix_fmt", "yuv420p",
                 "-f", "mpegts",
@@ -1029,10 +1139,10 @@ class VideoServer:
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL
                 )
-                print("[+] Hardware GPU Video Encoding active (NVIDIA NVENC h264_nvenc)")
+                logger.info("[+] Hardware GPU Video Encoding active (NVIDIA NVENC h264_nvenc)")
                 return proc
             except Exception as e:
-                print(f"[!] Warning: Failed to spawn ffmpeg with NVENC ({e}), falling back to libx264...")
+                logger.warning("[!] Failed to spawn ffmpeg with NVENC (%s), falling back to libx264...", e)
 
         cmd = [
             "ffmpeg",
@@ -1060,7 +1170,7 @@ class VideoServer:
                 stderr=asyncio.subprocess.DEVNULL
             )
         except Exception as e:
-            print(f"[!] Warning: Failed to spawn ffmpeg: {e}")
+            logger.warning("[!] Failed to spawn ffmpeg: %s", e)
             return None
 
 
@@ -1070,8 +1180,10 @@ class VideoServer:
             headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) OrionShadow/1.0"}
             self.session = aiohttp.ClientSession(headers=headers)
 
-        print(f"[+] Multicast Video Stream broadcasting on udp://@{self.multicast_group}:{self.port}")
-        print(f"[*] Connect via ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 -framedrop -sync video udp://@{self.multicast_group}:{self.port}")
+        logger.info("[+] Multicast Video Stream broadcasting on udp://@%s:%d (%dx%d @ %dfps)",
+                    self.multicast_group, self.port, self.width, self.height, self.fps)
+        logger.info("[*] Connect via ffplay -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 -framedrop -sync video udp://@%s:%d",
+                    self.multicast_group, self.port)
 
         self.proc = await self._start_ffmpeg()
 
@@ -1081,7 +1193,7 @@ class VideoServer:
 
         # Fallback socket if ffmpeg is unavailable
         if self.proc is None:
-            print("[*] Using direct UDP multicast socket fallback")
+            logger.warning("[*] Using direct UDP multicast socket fallback (ffmpeg unavailable)")
             self._init_fallback_socket()
 
         frame_interval = 1.0 / self.fps
@@ -1093,7 +1205,7 @@ class VideoServer:
                     await self._update_frame()
                 except Exception as e:
                     # Log rendering error but keep stream loop alive
-                    print(f"[!] Video rendering error: {e}")
+                    logger.error("[!] Video rendering error: %s", e)
 
                 if self.current_frame is not None:
                     if hasattr(self.current_frame, 'tobytes'):
@@ -1108,7 +1220,7 @@ class VideoServer:
                             self.proc.stdin.write(raw_bytes)
                             await asyncio.wait_for(self.proc.stdin.drain(), timeout=1.0)
                         except (BrokenPipeError, ConnectionResetError, OSError, asyncio.TimeoutError) as e:
-                            print(f"[!] ffmpeg pipe error ({e}), attempting restart...")
+                            logger.error("[!] ffmpeg pipe error (%s), attempting restart...", e)
                             try:
                                 if self.proc.stdin:
                                     self.proc.stdin.close()
@@ -1120,7 +1232,7 @@ class VideoServer:
                                 pass
                             self.proc = await self._start_ffmpeg()
                             if self.proc is None and self.sock is None:
-                                print("[*] Switching to direct UDP multicast socket fallback")
+                                logger.warning("[*] Switching to direct UDP multicast socket fallback")
                                 self._init_fallback_socket()
                     elif self.sock and cv2 is not None and isinstance(self.current_frame, np.ndarray):
                         # Send compressed JPEG over UDP
