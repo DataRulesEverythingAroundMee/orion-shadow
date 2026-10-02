@@ -43,8 +43,8 @@ class TestVideoTracking(unittest.TestCase):
         state = GimbalState()
         server = VideoServer(state)
 
-        state.gps_lat = 39.7774
-        state.gps_lon = -84.0819
+        state.gps_lat = 41.8925
+        state.gps_lon = -87.6242
         state.gps_alt = 2000.0
         state.aircraft_heading = 90.0
         state.target_tilt = -30.0
@@ -71,8 +71,8 @@ class TestVideoTracking(unittest.TestCase):
         state = GimbalState()
         server = VideoServer(state)
 
-        state.gps_lat = 39.7774
-        state.gps_lon = -84.0819
+        state.gps_lat = 41.8925
+        state.gps_lon = -87.6242
         state.gps_alt = 3000.0
         state.aircraft_heading = 240.0
         state.target_tilt = -20.0
@@ -94,8 +94,8 @@ class TestVideoTracking(unittest.TestCase):
 
         state = GimbalState()
         server = VideoServer(state, width=640, height=480)
-        state.gps_lat = 39.7774
-        state.gps_lon = -84.0819
+        state.gps_lat = 41.8925
+        state.gps_lon = -87.6242
         state.gps_alt = 2000.0
         state.target_tilt = -15.0
         state.physics.tilt["pos"] = -15.0
@@ -132,8 +132,8 @@ class TestVideoTracking(unittest.TestCase):
 
         state = GimbalState()
         server = VideoServer(state)
-        state.gps_lat = 39.7774
-        state.gps_lon = -84.0819
+        state.gps_lat = 41.8925
+        state.gps_lon = -87.6242
         state.gps_alt = 1500.0
 
         bg = server._generate_synthetic_background()
@@ -187,7 +187,7 @@ class TestVideoTracking(unittest.TestCase):
         server = VideoServer(state, tile_url_template="http://dummy/{z}/{x}/{y}.png")
         vis = server.visualizer
 
-        lat, lon, alt = 39.7774, -84.0819, 1000.0
+        lat, lon, alt = 41.8925, -87.6242, 1000.0
 
         for pitch in [-1.0, -5.0, -15.0, -30.0]:
             for zoom in [1.0, 3.0, 5.0, 6.0, 10.0, 20.0]:

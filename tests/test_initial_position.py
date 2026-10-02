@@ -26,9 +26,9 @@ class TestInitialPosition(unittest.TestCase):
         self.assertFalse(state.gps_received)
 
     def test_custom_starting_coordinates(self):
-        state = GimbalState(lat=39.7774, lon=-84.0819, alt=1000.0)
-        self.assertAlmostEqual(state.gps_lat, 39.7774, places=4)
-        self.assertAlmostEqual(state.gps_lon, -84.0819, places=4)
+        state = GimbalState(lat=41.8925, lon=-87.6242, alt=1000.0)
+        self.assertAlmostEqual(state.gps_lat, 41.8925, places=4)
+        self.assertAlmostEqual(state.gps_lon, -87.6242, places=4)
         self.assertAlmostEqual(state.gps_alt, 1000.0, places=1)
         # Automatic default tilt for airborne camera
         self.assertAlmostEqual(state.target_tilt, -20.0, places=1)
@@ -36,10 +36,10 @@ class TestInitialPosition(unittest.TestCase):
         self.assertFalse(state.gps_received)
 
     def test_custom_tilt_and_pan_override(self):
-        state = GimbalState(lat=39.7774, lon=-84.0819, alt=1000.0,
+        state = GimbalState(lat=41.8925, lon=-87.6242, alt=1000.0,
                             pan=15.0, tilt=-25.0, heading=180.0)
-        self.assertAlmostEqual(state.gps_lat, 39.7774, places=4)
-        self.assertAlmostEqual(state.gps_lon, -84.0819, places=4)
+        self.assertAlmostEqual(state.gps_lat, 41.8925, places=4)
+        self.assertAlmostEqual(state.gps_lon, -87.6242, places=4)
         self.assertAlmostEqual(state.gps_alt, 1000.0, places=1)
         self.assertAlmostEqual(state.target_pan, 15.0, places=1)
         self.assertAlmostEqual(state.current_pan, 15.0, places=1)
@@ -48,7 +48,7 @@ class TestInitialPosition(unittest.TestCase):
         self.assertAlmostEqual(state.aircraft_heading, 180.0, places=1)
 
     def test_geolocate_telemetry_reflects_starting_position(self):
-        state = GimbalState(lat=39.7774, lon=-84.0819, alt=1000.0, tilt=-45.0)
+        state = GimbalState(lat=41.8925, lon=-87.6242, alt=1000.0, tilt=-45.0)
         pkt_bytes = state.get_geolocate_telemetry_core_packet()
         # Decode payload: 4-byte header (D0 0D 0B len), data, 2-byte checksum
         self.assertEqual(pkt_bytes[0], 0xD0)
@@ -60,12 +60,12 @@ class TestInitialPosition(unittest.TestCase):
         lat_deg = lat_raw / 1e7
         lon_deg = lon_raw / 1e7
         alt_m = alt_raw / 10000.0
-        self.assertAlmostEqual(lat_deg, 39.7774, places=4)
-        self.assertAlmostEqual(lon_deg, -84.0819, places=4)
+        self.assertAlmostEqual(lat_deg, 41.8925, places=4)
+        self.assertAlmostEqual(lon_deg, -87.6242, places=4)
         self.assertAlmostEqual(alt_m, 1000.0, places=1)
 
     def test_reset_restores_starting_position(self):
-        state = GimbalState(lat=39.7774, lon=-84.0819, alt=1000.0, tilt=-30.0)
+        state = GimbalState(lat=41.8925, lon=-87.6242, alt=1000.0, tilt=-30.0)
         # Update with new GPS position from incoming stream
         gps_pkt = OrionPacket(OrionPktType.GPS_DATA, struct.pack(">fff", 34.05, -118.25, 5000.0))
         state.update_from_command(gps_pkt)
@@ -75,31 +75,31 @@ class TestInitialPosition(unittest.TestCase):
         # Send RESET
         reset_pkt = OrionPacket(OrionPktType.RESET, b"")
         state.update_from_command(reset_pkt)
-        self.assertAlmostEqual(state.gps_lat, 39.7774, places=4)
-        self.assertAlmostEqual(state.gps_lon, -84.0819, places=4)
+        self.assertAlmostEqual(state.gps_lat, 41.8925, places=4)
+        self.assertAlmostEqual(state.gps_lon, -87.6242, places=4)
         self.assertAlmostEqual(state.gps_alt, 1000.0, places=1)
         self.assertAlmostEqual(state.target_tilt, -30.0, places=1)
         self.assertFalse(state.gps_received)
 
     def test_orion_server_initialization_with_starting_position(self):
         server = OrionServer(
-            lat=39.7774, lon=-84.0819, alt=1000.0,
+            lat=41.8925, lon=-87.6242, alt=1000.0,
             pan=10.0, tilt=-45.0, heading=90.0,
             video_enabled=False
         )
-        self.assertAlmostEqual(server.state.gps_lat, 39.7774, places=4)
-        self.assertAlmostEqual(server.state.gps_lon, -84.0819, places=4)
+        self.assertAlmostEqual(server.state.gps_lat, 41.8925, places=4)
+        self.assertAlmostEqual(server.state.gps_lon, -87.6242, places=4)
         self.assertAlmostEqual(server.state.gps_alt, 1000.0, places=1)
         self.assertAlmostEqual(server.state.current_pan, 10.0, places=1)
         self.assertAlmostEqual(server.state.current_tilt, -45.0, places=1)
         self.assertAlmostEqual(server.state.aircraft_heading, 90.0, places=1)
 
     def test_video_server_telemetry_and_mode_transitions(self):
-        state = GimbalState(lat=39.7774, lon=-84.0819, alt=1000.0)
+        state = GimbalState(lat=41.8925, lon=-87.6242, alt=1000.0)
         vs = VideoServer(state)
         telem = vs._get_telemetry()
-        self.assertAlmostEqual(telem['lat'], 39.7774, places=4)
-        self.assertAlmostEqual(telem['lon'], -84.0819, places=4)
+        self.assertAlmostEqual(telem['lat'], 41.8925, places=4)
+        self.assertAlmostEqual(telem['lon'], -87.6242, places=4)
         self.assertAlmostEqual(telem['alt'], 1000.0, places=1)
         self.assertAlmostEqual(telem['tilt'], -20.0, places=1)
         self.assertAlmostEqual(telem['cam_pitch'], -20.0, places=1)
@@ -108,7 +108,7 @@ class TestInitialPosition(unittest.TestCase):
         self.assertFalse(state.gps_received)
 
         # Incoming GPS stream arrives
-        gps_pkt = OrionPacket(OrionPktType.GPS_DATA, struct.pack(">fff", 39.78, -84.09, 1020.0))
+        gps_pkt = OrionPacket(OrionPktType.GPS_DATA, struct.pack(">fff", 41.89, -87.62, 1020.0))
         state.update_from_command(gps_pkt)
         self.assertTrue(state.gps_received)
 

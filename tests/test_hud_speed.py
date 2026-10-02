@@ -59,13 +59,13 @@ class TestHudSpeed(unittest.TestCase):
     def test_gps_data_explicit_4float_speed(self):
         """Verify GPS_DATA with 4 floats parses lat, lon, alt, and speed."""
         state = GimbalState(0.1, self.terrain)
-        payload = struct.pack(">ffff", 39.7774, -84.0819, 2500.0, 165.0)
+        payload = struct.pack(">ffff", 41.8925, -87.6242, 2500.0, 165.0)
         pkt = OrionPacket(OrionPktType.GPS_DATA, payload)
         state.update_from_command(pkt)
 
         self.assertTrue(state.gps_received)
-        self.assertAlmostEqual(state.gps_lat, 39.7774, places=4)
-        self.assertAlmostEqual(state.gps_lon, -84.0819, places=4)
+        self.assertAlmostEqual(state.gps_lat, 41.8925, places=4)
+        self.assertAlmostEqual(state.gps_lon, -87.6242, places=4)
         self.assertAlmostEqual(state.gps_alt, 2500.0, places=1)
         self.assertAlmostEqual(state.aircraft_speed, 165.0, places=1)
 
@@ -147,7 +147,7 @@ class TestHudSpeed(unittest.TestCase):
         bridge.is_connected = True
         bridge.sock = MagicMock()
 
-        success = bridge.send_aircraft_position(39.5, -84.2, 1200.0, 180.0, 210.0)
+        success = bridge.send_aircraft_position(41.8, -87.6, 1200.0, 180.0, 210.0)
         self.assertTrue(success)
         self.assertEqual(bridge.sock.sendto.call_count, 1)
 
@@ -161,8 +161,8 @@ class TestHudSpeed(unittest.TestCase):
         self.assertEqual(payload_len, 16)
         payload = sent_bytes[4:20]
         lat, lon, alt, spd = struct.unpack(">ffff", payload)
-        self.assertAlmostEqual(lat, 39.5, places=3)
-        self.assertAlmostEqual(lon, -84.2, places=3)
+        self.assertAlmostEqual(lat, 41.8, places=3)
+        self.assertAlmostEqual(lon, -87.6, places=3)
         self.assertAlmostEqual(alt, 1200.0, places=1)
         self.assertAlmostEqual(spd, 210.0, places=1)
 

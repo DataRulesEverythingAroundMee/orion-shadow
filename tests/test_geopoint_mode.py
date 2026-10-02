@@ -26,9 +26,9 @@ except ImportError:
 
 class TestGeopointMode(unittest.TestCase):
     def setUp(self):
-        # Aircraft starts at (39.7774, -84.0819), 1000m MSL, heading North (0 deg), pitch 0 deg
+        # Aircraft starts at (41.8925, -87.6242), 1000m MSL, heading North (0 deg), pitch 0 deg
         self.state = GimbalState(
-            lat=39.7774, lon=-84.0819, alt=1000.0,
+            lat=41.8925, lon=-87.6242, alt=1000.0,
             pan=0.0, tilt=-20.0, heading=0.0, speed=0.0
         )
 
@@ -39,8 +39,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_geopoint_pan_tilt_due_north(self):
         """Target 1000m due North, 0m MSL: pan=0 deg, tilt=-45 deg."""
-        target_lat = 39.7774 + 1000.0 / 111320.0
-        target_lon = -84.0819
+        target_lat = 41.8925 + 1000.0 / 111320.0
+        target_lon = -87.6242
         target_alt = 0.0
 
         raw_lat = int(round(target_lat * 1e7))
@@ -56,10 +56,10 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_geopoint_pan_tilt_due_east(self):
         """Target ~1000m due East, 0m MSL: pan=+90 deg, tilt=-45 deg."""
-        lat_rad = math.radians(39.7774)
+        lat_rad = math.radians(41.8925)
         d_lon = 1000.0 / (111320.0 * math.cos(lat_rad))
-        target_lat = 39.7774
-        target_lon = -84.0819 + d_lon
+        target_lat = 41.8925
+        target_lon = -87.6242 + d_lon
         target_alt = 0.0
 
         raw_lat = int(round(target_lat * 1e7))
@@ -78,8 +78,8 @@ class TestGeopointMode(unittest.TestCase):
         self.state.aircraft_pitch = 5.0
 
         # Target due North (azimuth 0 deg, elevation -45 deg)
-        target_lat = 39.7774 + 1000.0 / 111320.0
-        target_lon = -84.0819
+        target_lat = 41.8925 + 1000.0 / 111320.0
+        target_lon = -87.6242
         target_alt = 0.0
 
         raw_lat = int(round(target_lat * 1e7))
@@ -95,8 +95,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_geopoint_closure_mode_snaps_instantly(self):
         """Option 0x02 (geopointClosure) drives gimbal immediately to target."""
-        target_lat = 39.7774 + 1000.0 / 111320.0
-        target_lon = -84.0819
+        target_lat = 41.8925 + 1000.0 / 111320.0
+        target_lon = -87.6242
         target_alt = 0.0
 
         raw_lat = int(round(target_lat * 1e7))
@@ -112,8 +112,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_geopoint_continuous_tracking_with_aircraft_movement(self):
         """As the aircraft flies forward, gimbal continuously adjusts tilt to keep center locked."""
-        target_lat = 39.7774 + 1000.0 / 111320.0
-        target_lon = -84.0819
+        target_lat = 41.8925 + 1000.0 / 111320.0
+        target_lon = -87.6242
         target_alt = 0.0
 
         raw_lat = int(round(target_lat * 1e7))
@@ -132,8 +132,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_geopoint_target_velocity_propagation(self):
         """If target has velocity (e.g. driving North at 20 m/s), target propagates each step."""
-        target_lat = 39.7774 + 0.009
-        target_lon = -84.0819
+        target_lat = 41.8925 + 0.009
+        target_lon = -87.6242
         target_alt = 0.0
 
         raw_lat = int(round(target_lat * 1e7))
@@ -153,8 +153,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_orion_cmd_cancels_geopoint_mode(self):
         """Sending OrionCmd packet cancels ORION_MODE_GEOPOINT."""
-        target_lat = 39.7774 + 0.009
-        target_lon = -84.0819
+        target_lat = 41.8925 + 0.009
+        target_lon = -87.6242
         target_alt = 0.0
         raw_lat = int(round(target_lat * 1e7))
         raw_lon = int(round(target_lon * 1e7))
@@ -171,8 +171,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_reset_cancels_geopoint_mode(self):
         """Sending RESET cancels ORION_MODE_GEOPOINT and resets state."""
-        raw_lat = int(round(39.78 * 1e7))
-        raw_lon = int(round(-84.08 * 1e7))
+        raw_lat = int(round(41.89 * 1e7))
+        raw_lon = int(round(-87.62 * 1e7))
         raw_alt = int(round(100.0 * 10000.0))
         pkt_data = struct.pack(">iiihhh", raw_lat, raw_lon, raw_alt, 0, 0, 0)
         self.state.update_from_command(OrionPacket(OrionPktType.GEOPOINT_CMD, pkt_data))
@@ -183,8 +183,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_geolocate_telemetry_core_reports_geopoint_mode(self):
         """GeolocateTelemetryCore packet reports mode=96 (0x60) when in geopoint mode."""
-        target_lat = 39.7774 + 0.009
-        target_lon = -84.0819
+        target_lat = 41.8925 + 0.009
+        target_lon = -87.6242
         target_alt = 0.0
         raw_lat = int(round(target_lat * 1e7))
         raw_lon = int(round(target_lon * 1e7))
@@ -205,8 +205,8 @@ class TestGeopointMode(unittest.TestCase):
 
     def test_video_server_hud_geopoint_mode(self):
         """VideoServer._draw_hud displays GEOPOINT status and GEO LOCK reticle."""
-        target_lat = 39.7774 + 0.009
-        target_lon = -84.0819
+        target_lat = 41.8925 + 0.009
+        target_lon = -87.6242
         target_alt = 0.0
         raw_lat = int(round(target_lat * 1e7))
         raw_lon = int(round(target_lon * 1e7))
@@ -234,7 +234,7 @@ class TestGeopointMode(unittest.TestCase):
 
         server = OrionServer(
             host="127.0.0.1", port=0, tcp_port=tcp_port, dt=0.05, video_enabled=False,
-            lat=39.7774, lon=-84.0819, alt=1000.0, heading=0.0
+            lat=41.8925, lon=-87.6242, alt=1000.0, heading=0.0
         )
         thread = threading.Thread(target=lambda: asyncio.run(server.run()), daemon=True)
         thread.start()
@@ -245,8 +245,8 @@ class TestGeopointMode(unittest.TestCase):
             client_sock.connect(("127.0.0.1", tcp_port))
 
             # Send GeopointCmd packet: target 1000m North, alt 0m
-            target_lat = 39.7774 + 1000.0 / 111320.0
-            target_lon = -84.0819
+            target_lat = 41.8925 + 1000.0 / 111320.0
+            target_lon = -87.6242
             target_alt = 0.0
             raw_lat = int(round(target_lat * 1e7))
             raw_lon = int(round(target_lon * 1e7))
