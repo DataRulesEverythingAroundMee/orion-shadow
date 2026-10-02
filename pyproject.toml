@@ -17,8 +17,13 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = [
-    # Replace 'cuda13x' with your installed CUDA version (cuda11x, cuda12x, etc.)
-    "cupy-cuda13x>=13.0.0",
+    # Replace 'cuda13x' / non-suffixed packages with your installed CUDA version (e.g. cuda12x)
+    "cupy-cuda13x[ctk]>=13.0.0",
+    "nvidia-cuda-runtime",
+    "nvidia-cuda-nvrtc",
+    "nvidia-nvjitlink",
+    "nvidia-cublas",
+    "nvidia-cuda-cupti",
 ]
 dev = [
     "pytest>=7.4.0",

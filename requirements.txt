@@ -1,21 +1,34 @@
 # Orion Shadow — Python Requirements
 # Install with: pip install -r requirements.txt
-#
-# Core runtime (required)
+
+# --- Core Runtime Dependencies ---
 numpy>=1.24.0
-opencv-python>=4.8.0       # cv2 — rendering, tile stitching, HUD, warpPerspective
-aiohttp>=3.9.0             # async HTTP for tile fetching
+opencv-python>=4.8.0          # cv2 — frame rendering, tile stitching, HUD overlay, perspective warping
+aiohttp>=3.9.0                # Async HTTP client for concurrent tile prefetching and downloads
 
-# Optional — GPU acceleration
-cupy-cuda13x>=13.0.0     # CuPy drop-in NumPy replacement for GPU ray marching
-#                          # Replace 'cuda13x' with your CUDA version (e.g. cuda12x)
-#                          # Check with: nvcc --version
-#
-# Optional — CUDA-enabled OpenCV (for cv2.cuda.remap etc.)
-# Requires building OpenCV from source with -DWITH_CUDA=ON, or:
-# pip install opencv-contrib-python  (CPU only, no cuda modules)
-# For GPU remap: use the CUDA-compiled wheel matching your CUDA toolkit version
+# --- GPU Acceleration Dependencies (NVIDIA CUDA 13.x / CuPy) ---
+# CuPy with CUDA Toolkit component wheels (NVRTC, runtime, JIT linker)
+# For CUDA 13.x (Host GPU: NVIDIA RTX A1000 / CUDA 13.1):
+cupy-cuda13x[ctk]>=13.0.0     # Drop-in NumPy replacement on GPU for ray-marching elevation numerics
+nvidia-cuda-runtime           # Provides libcudart.so (auto-loaded by terrain_renderer / scripts/run.sh)
+nvidia-cuda-nvrtc             # Provides libnvrtc.so for runtime kernel compilation
+nvidia-nvjitlink              # Provides libnvJitLink.so for JIT linking
+nvidia-cublas                 # High-performance BLAS acceleration
+nvidia-cuda-cupti             # CUDA Profiling Tools Interface runtime
 
-# Development / testing
+# Note: For CUDA 12.x environments, replace the above CUDA 13.x packages with:
+# cupy-cuda12x[ctk]>=13.0.0
+# nvidia-cuda-runtime-cu12
+# nvidia-cuda-nvrtc-cu12
+# nvidia-nvjitlink-cu12
+# nvidia-cublas-cu12
+
+# --- Optional GPU Remap & Video Encoding ---
+# cv2.cuda.remap requires an OpenCV build compiled with CUDA support:
+# - Build OpenCV with -DWITH_CUDA=ON, or install a prebuilt CUDA-enabled wheel
+# Hardware video encoding (H.264/HEVC NVENC) is handled directly via system FFmpeg:
+# - Requires: ffmpeg with h264_nvenc / hevc_nvenc enabled and NVIDIA driver >= 520
+
+# --- Development & Testing ---
 pytest>=7.4.0
 pytest-asyncio>=0.23.0

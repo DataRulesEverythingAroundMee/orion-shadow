@@ -8,6 +8,16 @@ set -e
 # Ensure we are in the project root
 cd "$(dirname "$0")/../src"
 
+# Auto-configure CUDA runtime library paths for NVIDIA pip packages if present
+NVIDIA_SITE="$HOME/.local/lib/python3.9/site-packages/nvidia"
+if [ -d "$NVIDIA_SITE" ]; then
+    for dir in "$NVIDIA_SITE"/*/lib; do
+        if [ -d "$dir" ]; then
+            export LD_LIBRARY_PATH="$dir:${LD_LIBRARY_PATH:-}"
+        fi
+    done
+fi
+
 # Default values (matching Orion SDK OrionComm.h)
 HOST="0.0.0.0"
 PORT="8745"
@@ -33,6 +43,11 @@ HEADING=""
 SPEED=""
 
 LOGGER="INFO"
+GPU_ENCODING=""
+DRAPE_SUBSAMPLE=""
+NO_DISTANCE_LOD=""
+NO_VIDEO=""
+TILE_CACHE_DIR=""
 
 # Parse arguments
 while [[ "$#" -gt 0 ]]; do
@@ -50,6 +65,11 @@ while [[ "$#" -gt 0 ]]; do
         --max-tile-zoom) MAX_TILE_ZOOM="$2"; shift ;;
         --prefetch-distance) PREFETCH_DISTANCE="$2"; shift ;;
         --no-prefetch) NO_PREFETCH="1" ;;
+        --no-video) NO_VIDEO="1" ;;
+        --gpu-encoding) GPU_ENCODING="1" ;;
+        --no-gpu-encoding) GPU_ENCODING="0" ;;
+        --drape-subsample) DRAPE_SUBSAMPLE="$2"; shift ;;
+        --no-distance-lod) NO_DISTANCE_LOD="1" ;;
         --tile-cache-dir) TILE_CACHE_DIR="$2"; shift ;;
         --lat|--latitude) LAT="$2"; shift ;;
         --lon|--longitude) LON="$2"; shift ;;
@@ -102,6 +122,10 @@ if [ -n "$NO_PREFETCH" ]; then
     CMD="$CMD --no-prefetch"
 fi
 
+if [ -n "$NO_VIDEO" ]; then
+    CMD="$CMD --no-video"
+fi
+
 if [ -n "$LAT" ]; then
     CMD="$CMD --lat \"$LAT\""
 fi
@@ -128,6 +152,20 @@ fi
 
 if [ -n "$SPEED" ]; then
     CMD="$CMD --speed \"$SPEED\""
+fi
+
+if [ "$GPU_ENCODING" = "1" ]; then
+    CMD="$CMD --gpu-encoding"
+elif [ "$GPU_ENCODING" = "0" ]; then
+    CMD="$CMD --no-gpu-encoding"
+fi
+
+if [ -n "$DRAPE_SUBSAMPLE" ]; then
+    CMD="$CMD --drape-subsample \"$DRAPE_SUBSAMPLE\""
+fi
+
+if [ -n "$NO_DISTANCE_LOD" ]; then
+    CMD="$CMD --no-distance-lod"
 fi
 
 echo "Starting OrionShadow Simulator..."

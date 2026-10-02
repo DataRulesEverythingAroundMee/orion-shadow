@@ -145,7 +145,7 @@ class VideoServer:
             return False
         try:
             res = subprocess.run(
-                ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=0.1:size=64x64:rate=10",
+                ["ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=0.1:size=320x240:rate=10",
                  "-c:v", "h264_nvenc", "-f", "null", "-"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

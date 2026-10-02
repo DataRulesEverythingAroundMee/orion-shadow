@@ -21,6 +21,29 @@ except ImportError:
 # Optional GPU backends — both are purely additive; CPU paths remain intact.
 # ---------------------------------------------------------------------------
 
+# Auto-discover pip-installed NVIDIA runtime libraries (nvrtc, cudart)
+try:
+    import os
+    import site
+    import ctypes
+    for site_dir in (site.getsitepackages() if hasattr(site, 'getsitepackages') else []) + [site.getusersitepackages()]:
+        nv_dir = os.path.join(site_dir, 'nvidia')
+        if os.path.isdir(nv_dir):
+            for sub in os.listdir(nv_dir):
+                lib_dir = os.path.join(nv_dir, sub, 'lib')
+                if os.path.isdir(lib_dir):
+                    cur_ld = os.environ.get('LD_LIBRARY_PATH', '')
+                    if lib_dir not in cur_ld:
+                        os.environ['LD_LIBRARY_PATH'] = f"{lib_dir}:{cur_ld}" if cur_ld else lib_dir
+                    for so in sorted(os.listdir(lib_dir)):
+                        if (so.startswith('libnvrtc') or so.startswith('libcudart') or so.startswith('libnvJitLink')) and (so.endswith('.so') or '.so.' in so):
+                            try:
+                                ctypes.CDLL(os.path.join(lib_dir, so))
+                            except Exception:
+                                pass
+except Exception:
+    pass
+
 # CuPy: drop-in NumPy replacement for GPU ray-marching numerics (Fix 3b)
 try:
     import cupy as cp
