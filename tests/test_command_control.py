@@ -311,5 +311,245 @@ class TestCommandControl(unittest.TestCase):
         self.assertEqual(state.mode, OrionMode.PATH)
         self.assertEqual(state.target_tilt, state.tilt_min)
 
+    def test_default_model_hd40_xv(self):
+        """Verify HD40-XV is the default model with single EO camera and correct product metadata."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket
+        state = GimbalState()
+        self.assertEqual(state.model, "HD40-XV")
+        self.assertEqual(state.model_name, "Trillium HD40-XV")
+        self.assertEqual(state.part_number, "HD40-XV-001")
+        self.assertEqual(state.serial_number, 4000100)
+        self.assertEqual(state.hardware_id, 0x4040)
+        self.assertEqual(state.gimbal_weight_g, 840.0)
+        self.assertEqual(len(state.cameras), 1)
+        self.assertEqual(state.cameras[0]["name"], "EO Visible")
+
+        # PRODUCT query packet (0xA7)
+        resp = state.update_from_command(OrionPacket(OrionPktType.PRODUCT, b""))
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp[2], OrionPktType.PRODUCT)
+        part_str = resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(part_str, "HD40-XV-001")
+
+    def test_selectable_model_hd40_lv(self):
+        """Verify HD40-LV selectable model enables dual cameras (EO + LWIR thermal) and correct metadata."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket
+        state = GimbalState(model="HD40-LV")
+        self.assertEqual(state.model, "HD40-LV")
+        self.assertEqual(state.model_name, "Trillium HD40-LV")
+        self.assertEqual(state.part_number, "HD40-LV-001")
+        self.assertEqual(state.serial_number, 4000101)
+        self.assertEqual(state.hardware_id, 0x404C)
+        self.assertEqual(state.gimbal_weight_g, 920.0)
+        self.assertEqual(len(state.cameras), 2)
+        self.assertEqual(state.cameras[0]["name"], "EO Visible")
+        self.assertEqual(state.cameras[1]["name"], "LWIR Thermal")
+        self.assertEqual(state.cameras[1]["type"], 2)  # CAMERA_TYPE_LWIR
+
+        # CAMERAS query packet (0x63)
+        cams_resp = state.update_from_command(OrionPacket(OrionPktType.CAMERAS, b""))
+        self.assertIsNotNone(cams_resp)
+        self.assertEqual(cams_resp[4], 2)  # NumCameras = 2
+
+        # PRODUCT query packet
+        prod_resp = state.update_from_command(OrionPacket(OrionPktType.PRODUCT, b""))
+        part_str = prod_resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(part_str, "HD40-LV-001")
+
+    def test_board_firmware_version_queries(self):
+        """Verify board firmware versions and inventory query packets."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket, OrionBoard
+        state = GimbalState()
+
+        # Crown Version (0x28)
+        resp = state.update_from_command(OrionPacket(OrionPktType.CROWN_VERSION, b""))
+        self.assertEqual(resp[2], OrionPktType.CROWN_VERSION)
+        ver = resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(ver, "3.1.9-rc4")
+
+        # Clevis Version (0x25)
+        resp = state.update_from_command(OrionPacket(OrionPktType.CLEVIS_VERSION, b""))
+        self.assertEqual(resp[2], OrionPktType.CLEVIS_VERSION)
+        ver = resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(ver, "2.4.1")
+
+        # Payload Version (0x29)
+        resp = state.update_from_command(OrionPacket(OrionPktType.PAYLOAD_VERSION, b""))
+        self.assertEqual(resp[2], OrionPktType.PAYLOAD_VERSION)
+        ver = resp[4:28].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(ver, "1.8.0")
+
+        # Tracker Version (0x2C)
+        resp = state.update_from_command(OrionPacket(OrionPktType.TRACKER_VERSION, b""))
+        self.assertEqual(resp[2], OrionPktType.TRACKER_VERSION)
+        ver = resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(ver, "2.1.0")
+
+        # LensCtl Version (0xF9)
+        resp = state.update_from_command(OrionPacket(OrionPktType.LENSCTL_VERSION, b""))
+        self.assertEqual(resp[2], OrionPktType.LENSCTL_VERSION)
+        ver = resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(ver, "1.2.0")
+
+        # Retract Version (0xF8)
+        resp = state.update_from_command(OrionPacket(OrionPktType.RETRACT_VERSION, b""))
+        self.assertEqual(resp[2], OrionPktType.RETRACT_VERSION)
+        ver = resp[4:20].split(b'\x00')[0].decode('ascii')
+        self.assertEqual(ver, "1.0.0")
+
+        # Board info (0x27)
+        resp = state.update_from_command(OrionPacket(OrionPktType.BOARD, bytes([OrionBoard.BOARD_CROWN])))
+        self.assertEqual(resp[2], OrionPktType.BOARD)
+
+        # Board heartbeat (0x4A)
+        resp = state.update_from_command(OrionPacket(OrionPktType.BOARD_HEARTBEAT, b""))
+        self.assertEqual(resp[2], OrionPktType.BOARD_HEARTBEAT)
+
+    def test_thermal_flir_lynred_and_unified_err(self):
+        """Verify FLIR, Lynred settings and unified camera error / boresight calibration packets."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket
+        state = GimbalState(model="HD40-LV")
+
+        # 1. FLIR Settings (0x67): set palette=4 (Ironbow), NUC type=1
+        # byte 0: index (1), byte 1: (palette << 4) | (nuc_type << 1) = (4 << 4) | (1 << 1) = 0x42
+        flir_cmd = bytes([1, 0x42, 30, 2, 25, 130, 10, 0, 50, 100, 0, 90, 15, 240])
+        resp = state.update_from_command(OrionPacket(OrionPktType.FLIR_SETTINGS, flir_cmd))
+        self.assertEqual(resp[2], OrionPktType.FLIR_SETTINGS)
+        self.assertEqual(state.flir_palette, 4)
+        self.assertEqual(state.flir_nuc_type, 1)
+
+        # 2. Lynred Settings (0x7B): contrast mode=1 (Manual), ICE moving avg=60
+        # byte 0: index 1, bytes 1-2: (1 << 15) | (60 << 6) = 0x8F60
+        lynred_cmd = struct.pack(">BHBB", 1, (1 << 15) | (60 << 6), 5, 95)
+        resp = state.update_from_command(OrionPacket(OrionPktType.LYNRED_SETTINGS, lynred_cmd))
+        self.assertEqual(resp[2], OrionPktType.LYNRED_SETTINGS)
+        self.assertEqual(state.lynred_contrast_mode, 1)
+        self.assertEqual(state.lynred_ice_moving_avg, 60)
+        self.assertEqual(state.lynred_ice_min_thresh, 5)
+        self.assertEqual(state.lynred_ice_max_thresh, 95)
+
+        # 3. Unified Camera Angular Error Settings (0xFD)
+        # 2 cameras: Cam 0 (0, 0), Cam 1 (0.01 rad, -0.01 rad)
+        # Scaler: 20860.12008116854
+        p1 = int(round(0.01 * 20860.12008116854))
+        t1 = int(round(-0.01 * 20860.12008116854))
+        err_cmd = bytearray([2])
+        err_cmd.extend(struct.pack(">hhhh", 0, 0, p1, t1))
+        resp = state.update_from_command(OrionPacket(OrionPktType.UNIFIED_CAM_ERR_SETTINGS, bytes(err_cmd)))
+        self.assertEqual(resp[2], OrionPktType.UNIFIED_CAM_ERR_SETTINGS)
+        self.assertEqual(len(state.cam_errors), 2)
+        self.assertAlmostEqual(state.cam_errors[1][0], 0.01, places=3)
+        self.assertAlmostEqual(state.cam_errors[1][1], -0.01, places=3)
+
+    def test_modern_video_tracking_and_tle(self):
+        """Verify TRACK_CMD (0x74), GEO_TRACK_STATUS (0x72), and TLE packets."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket, OrionMode
+        state = GimbalState()
+
+        # 1. Start primary track at (pan=0.1 rad, tilt=-0.2 rad) -> (100, -200) scaled 1000.0
+        track_start = struct.pack(">Bhhih", 0, 100, -200, 0, 0)
+        resp = state.update_from_command(OrionPacket(OrionPktType.TRACK_CMD, track_start))
+        self.assertEqual(resp[2], OrionPktType.GEO_TRACK_STATUS)
+        self.assertEqual(state.mode, OrionMode.TRACK)
+        self.assertTrue(state.primary_track["active"])
+        self.assertAlmostEqual(state.primary_track["pan"], 0.1)
+        self.assertAlmostEqual(state.primary_track["tilt"], -0.2)
+
+        # 2. Nudge primary track by (+0.05, -0.05)
+        nudge_cmd = struct.pack(">Bhhih", 4, 50, -50, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.TRACK_CMD, nudge_cmd))
+        self.assertAlmostEqual(state.primary_track["pan"], 0.15)
+        self.assertAlmostEqual(state.primary_track["tilt"], -0.25)
+
+        # 3. Stop all tracks (Cmd=2)
+        stop_cmd = struct.pack(">Bhhih", 2, 0, 0, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.TRACK_CMD, stop_cmd))
+        self.assertEqual(state.mode, OrionMode.RATE)
+        self.assertFalse(state.primary_track["active"])
+
+        # 4. TLE Command & Status
+        tle_cmd = bytes([1, 1])  # FilterType=1, Run=1
+        resp = state.update_from_command(OrionPacket(OrionPktType.TLE_COMMAND, tle_cmd))
+        self.assertEqual(resp[2], OrionPktType.TLE_STATUS)
+        self.assertTrue(state.tle_running)
+
+    def test_videorecord_cmd_and_status(self):
+        """Verify VIDEORECORD_CMD (0x76), STATUS (0x75), and CLOCK (0x77) handling."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket
+        state = GimbalState()
+
+        # Start Recording (bit 6) + UDP streaming (bit 7) -> 0xC0
+        dest_ip = 0xC0A80164  # 192.168.1.100
+        dest_port = 5004
+        cmd_data = bytearray()
+        cmd_data.append(0xC0)
+        cmd_data.extend(struct.pack(">IH", dest_ip, dest_port))
+        resp = state.update_from_command(OrionPacket(OrionPktType.VIDEORECORD_CMD, bytes(cmd_data)))
+        self.assertEqual(resp[2], OrionPktType.VIDEORECORD_STATUS)
+        self.assertEqual(state.videorecord_state, 2)  # Rec+Stream
+        self.assertEqual(state.videorecord_udp_dest_ip, dest_ip)
+        self.assertEqual(state.videorecord_udp_dest_port, dest_port)
+
+        # VideoRecord Clock packet (0x77)
+        clk_resp = state.update_from_command(OrionPacket(OrionPktType.VIDEORECORD_CLOCK, b""))
+        self.assertEqual(clk_resp[2], OrionPktType.VIDEORECORD_CLOCK)
+        self.assertEqual(len(clk_resp), 4 + 17 + 2)
+
+    def test_range_data_and_ins_quality_options(self):
+        """Verify RANGE_DATA (0xD6), INS_OPTIONS (0xD8), and INS_QUALITY (0xD3)."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket
+        state = GimbalState()
+
+        # 1. RANGE_DATA: range=1500.5m (150050 cm), maxAge=500ms, source=1 (LRF)
+        range_data = struct.pack(">IHB", 150050, 500, 1)
+        state.update_from_command(OrionPacket(OrionPktType.RANGE_DATA, range_data))
+        self.assertAlmostEqual(state.slant_range, 1500.5)
+        self.assertEqual(state.slant_range_source, 1)
+        # Verify range source reflected in GEOLOCATE_TELEMETRY_CORE
+        telem = state.get_geolocate_telemetry_core_packet()
+        range_src_byte = telem[80]
+        self.assertEqual(range_src_byte, 1)
+
+        # 2. INS_OPTIONS: enablePlatformRotation (0x80)
+        ins_data = bytearray([0x80, 0, 0, 0])
+        resp = state.update_from_command(OrionPacket(OrionPktType.INS_OPTIONS, bytes(ins_data)))
+        self.assertEqual(resp[2], OrionPktType.INS_OPTIONS)
+        self.assertTrue(state.ins_platform_rotation)
+
+        # 3. INS_QUALITY (0xD3)
+        q_resp = state.update_from_command(OrionPacket(OrionPktType.INS_QUALITY, b""))
+        self.assertEqual(q_resp[2], OrionPktType.INS_QUALITY)
+
+        # 4. AUTOPILOT_DATA (0x80)
+        ap_data = struct.pack(">HHff", 0, 0, 45.0, 48.0)  # IAS=45.0 m/s (~87.5 kts)
+        state.update_from_command(OrionPacket(OrionPktType.AUTOPILOT_DATA, ap_data))
+        self.assertAlmostEqual(state.aircraft_speed, 45.0 * 1.94384, delta=0.5)
+
+    def test_crown_mode_network_and_retract(self):
+        """Verify CROWN_MODE (0xB0), NETWORK_SETTINGS (0xE4), and RETRACT packets."""
+        from orion_shadow.core.protocol import OrionPktType, OrionPacket
+        state = GimbalState()
+
+        # Crown mode: switch to mode 1 (LogINS)
+        resp = state.update_from_command(OrionPacket(OrionPktType.CROWN_MODE, bytes([1])))
+        self.assertEqual(resp[2], OrionPktType.CROWN_MODE)
+        self.assertEqual(state.crown_mode, 1)
+
+        # Network settings (0xE4): 192.168.1.150, netmask 255.255.255.0, gateway 192.168.1.1
+        ip = 0xC0A80196
+        mask = 0xFFFFFF00
+        gw = 0xC0A80101
+        net_data = struct.pack(">IIIBHHBB", ip, mask, gw, 1, 1500, 8748, 0, 5)
+        resp = state.update_from_command(OrionPacket(OrionPktType.NETWORK_SETTINGS, net_data))
+        self.assertEqual(resp[2], OrionPktType.NETWORK_SETTINGS)
+        self.assertEqual(state.net_ip, ip)
+        self.assertEqual(state.net_max_clients, 5)
+
+        # Retract command: DEPLOY (1)
+        resp = state.update_from_command(OrionPacket(OrionPktType.RETRACT_CMD, bytes([1])))
+        self.assertEqual(resp[2], OrionPktType.RETRACT_STATUS)
+        self.assertEqual(state.retract_cmd, 1)
+        self.assertEqual(state.retract_state, 1)
+
 if __name__ == '__main__':
     unittest.main()

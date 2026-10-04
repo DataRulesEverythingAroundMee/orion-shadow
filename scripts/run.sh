@@ -43,6 +43,7 @@ HEADING=""
 SPEED=""
 
 LOGGER="INFO"
+MODEL="HD40-XV"
 GPU_ENCODING=""
 DRAPE_SUBSAMPLE=""
 NO_DISTANCE_LOD=""
@@ -78,6 +79,7 @@ while [[ "$#" -gt 0 ]]; do
         --tilt) TILT="$2"; shift ;;
         --heading) HEADING="$2"; shift ;;
         --speed) SPEED="$2"; shift ;;
+        --model) MODEL="$2"; shift ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
     shift
@@ -85,6 +87,10 @@ done
 
 # Construct command
 CMD="python3 -m orion_shadow.server --host $HOST --port $PORT --udp-in-port $UDP_IN_PORT --tcp-port $TCP_PORT --dt $DT"
+
+if [ -n "$MODEL" ]; then
+    CMD="$CMD --model \"$MODEL\""
+fi
 
 if [ -n "$LOGGER" ]; then
     CMD="$CMD --logger \"$LOGGER\""

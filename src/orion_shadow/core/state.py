@@ -9,11 +9,16 @@ from orion_shadow.engine.faults import FaultEngine
 
 logger = logging.getLogger(__name__)
 
+def _encode_fixed_string(s: str, length: int) -> bytes:
+    """Helper to encode string to fixed-length null-padded ASCII bytes."""
+    b = s.encode("ascii", errors="replace")[:length]
+    return b.ljust(length, b"\x00")
+
 class GimbalState:
     def __init__(self, dt: float = 0.1, terrain_engine: Optional[TerrainEngine] = None, initialized: bool = True,
                  lat: float = 0.0, lon: float = 0.0, alt: float = 0.0,
                  pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0,
-                 speed: float = 0.0):
+                 speed: float = 0.0, model: str = "HD40-XV"):
         self.dt = dt
         self.initial_lat = float(lat)
         self.initial_lon = float(lon)
@@ -40,6 +45,67 @@ class GimbalState:
         self.laser_power = 0.0  # 0.0 to 1.0
         self.is_faulty = False
 
+        # Model Profile Configuration (HD40-XV Default Single-Sensor vs HD40-LV Dual-Sensor)
+        self.model = "HD40-LV" if "LV" in model.upper() else "HD40-XV"
+        if self.model == "HD40-LV":
+            self.model_name = "Trillium HD40-LV"
+            self.part_number = "HD40-LV-001"
+            self.serial_number = 4000101
+            self.hardware_id = 0x404C
+            self.gimbal_weight_g = 920.0
+            self.cameras = [
+                {
+                    "name": "EO Visible",
+                    "type": 1,  # CAMERA_TYPE_VISIBLE
+                    "proto": 7,  # CAMERA_PROTO_KTNC
+                    "min_focal": 4.3,
+                    "max_focal": 129.0,
+                    "max_optical_zoom": 30.0,
+                    "max_total_zoom": 112.0,
+                    "pixel_pitch": 0.00297,
+                    "width": 1280,
+                    "height": 720,
+                    "align_min": (0, 0),
+                    "align_max": (0, 0),
+                },
+                {
+                    "name": "LWIR Thermal",
+                    "type": 2,  # CAMERA_TYPE_LWIR
+                    "proto": 1,  # CAMERA_PROTO_FLIR_TAU / BOSON
+                    "min_focal": 18.0,
+                    "max_focal": 18.0,
+                    "max_optical_zoom": 1.0,
+                    "max_total_zoom": 4.0,  # 4x digital zoom
+                    "pixel_pitch": 0.012,
+                    "width": 640,
+                    "height": 512,
+                    "align_min": (0, 0),
+                    "align_max": (0, 0),
+                },
+            ]
+        else:
+            self.model_name = "Trillium HD40-XV"
+            self.part_number = "HD40-XV-001"
+            self.serial_number = 4000100
+            self.hardware_id = 0x4040
+            self.gimbal_weight_g = 840.0
+            self.cameras = [
+                {
+                    "name": "EO Visible",
+                    "type": 1,  # CAMERA_TYPE_VISIBLE
+                    "proto": 7,  # CAMERA_PROTO_KTNC
+                    "min_focal": 4.3,
+                    "max_focal": 129.0,
+                    "max_optical_zoom": 30.0,
+                    "max_total_zoom": 112.0,
+                    "pixel_pitch": 0.00297,
+                    "width": 1280,
+                    "height": 720,
+                    "align_min": (0, 0),
+                    "align_max": (0, 0),
+                }
+            ]
+
         # Geopoint Mode State (ORION_MODE_GEOPOINT: 0x60 / 96)
         self.geopoint_lat = 0.0
         self.geopoint_lon = 0.0
@@ -59,7 +125,7 @@ class GimbalState:
         self.path_from = 0
         self.path_to = 0
 
-        # Camera State (Trillium HD40-XV Single Visible Camera Setup)
+        # Camera Optical Zoom State
         self.camera_zoom = 1.0
         self.camera_focus = 0.0
         self.camera_ready = True
@@ -69,22 +135,6 @@ class GimbalState:
         self.min_hfov_deg = 0.4              # 0.4° at max total zoom (112x)
         self.max_hfov_deg = 47.7             # 47.7° at wide (1.0x)
         self.optical_tele_hfov_deg = 1.8     # 1.8° at optical telephoto (30x)
-        self.cameras = [
-            {
-                "name": "EO Visible",
-                "type": 1,  # OrionCameraType_t.CAMERA_TYPE_VISIBLE
-                "proto": 7,  # OrionCameraProtocol_t.CAMERA_PROTO_KTNC
-                "min_focal": 4.3,
-                "max_focal": 129.0,
-                "max_optical_zoom": 30.0,
-                "max_total_zoom": 112.0,
-                "pixel_pitch": 0.00297,
-                "width": 1280,
-                "height": 720,
-                "align_min": (0, 0),
-                "align_max": (0, 0),
-            }
-        ]
 
         # OrionKtnc Specific Settings
         self.ktnc_index = 0
@@ -102,9 +152,90 @@ class GimbalState:
         self.ktnc_version_minor = 0
         self.ktnc_version_patch = 0
 
-        # Trillium HD40-XV Gimbal Limits & Physical Specs
-        self.model_name = "Trillium HD40-XV"
-        self.gimbal_weight_g = 840.0         # 840g weight
+        # Board Firmware Versions & Inventory
+        self.crown_version = "3.1.9-rc4"
+        self.crown_part_number = "CRWN-40-101"
+        self.clevis_version = "2.4.1"
+        self.clevis_part_number = "CLVS-40-201"
+        self.payload_version = "1.8.0"
+        self.payload_part_number = "PAYL-40-301"
+        self.payload_hw_type = 1
+        self.payload_hw_rev = 2
+        self.tracker_version = "2.1.0"
+        self.tracker_part_number = "TRKR-40-401"
+        self.tracker_app_bits = 0x00000007
+        self.lensctl_version = "1.2.0"
+        self.retract_version = "1.0.0"
+
+        # Thermal FLIR & Lynred Settings (for HD40-LV)
+        self.flir_palette = 0  # 0: WhiteHot, 1: BlackHot, 2: Rainbow, 4: Ironbow
+        self.flir_nuc_type = 0
+        self.flir_black_hot = 0
+        self.flir_disable_sffc = 0
+        self.flir_max_agc_gain = 25
+        self.flir_ace_level = 1
+        self.flir_dde_threshold = 24
+        self.flir_agc_midpoint = 128
+        self.flir_integration_time = 8.0
+        self.flir_agc_type = 0
+        self.flir_agc_gamma = 1.0
+        self.flir_agc_linear_percent = 50.0
+        self.flir_tce_enable = 0
+        self.flir_tce_gamma = 90
+        self.flir_tce_clip_limit = 15
+        self.flir_tce_alpha = 248
+
+        self.lynred_contrast_mode = 0
+        self.lynred_ice_moving_avg = 50
+        self.lynred_ice_min_thresh = 0
+        self.lynred_ice_max_thresh = 100
+
+        # Unified Camera Error / Boresight Alignment Settings
+        self.cam_errors = [(0.0, 0.0) for _ in self.cameras]
+
+        # Video Tracking State & Targets
+        self.primary_track = {"index": 0, "id": 1, "status": 1, "pan": 0.0, "tilt": 0.0, "size": 0.05, "active": False}
+        self.active_tracks: Dict[int, dict] = {}
+        self.tle_running = False
+        self.tle_filter_type = 0
+
+        # Onboard Video Recording & Stream Options
+        self.videorecord_enabled = False
+        self.videorecord_state = 0  # 0: Idle, 1: Recording, 2: Rec+Stream, 3: Streaming
+        self.videorecord_udp_dest_ip = 0
+        self.videorecord_udp_dest_port = 5004
+        self.videorecord_bitrate = 4000
+        self.videorecord_klv_mode = 1
+        self.videorecord_disk_consumption = 0.15
+
+        # Navigation Aiding, Slant Range & INS
+        self.slant_range = 0.0
+        self.slant_range_max_age_ms = 1000
+        self.slant_range_source = 0
+        self.slant_range_time = 0.0
+        self.ins_platform_rotation = False
+        self.ins_euler = [0.0, 0.0, 0.0]
+        self.ins_initial_heading = 0.0
+        self.ins_gps_lever_arm = [0.0, 0.0, 0.0]
+        self.ins_quality_mode = 2
+        self.geoid_undulation = 0.0
+
+        # Telemetry, Comms & Retract
+        self.crown_mode = 0
+        self.retract_cmd = 0
+        self.retract_state = 0
+        self.retract_pos = 0.0
+        self.retract_flags = 0
+        self.net_ip = 0xC0A801C8        # 192.168.1.200
+        self.net_mask = 0xFFFFFF00      # 255.255.255.0
+        self.net_gateway = 0xC0A80101   # 192.168.1.1
+        self.net_low_delay = 0
+        self.net_mtu = 1500
+        self.net_secondary_port = 0
+        self.net_low_bandwidth = 0
+        self.net_max_clients = 4
+
+        # Gimbal Limits & Physical Specs
         self.dimensions_mm = (98.0, 151.0)   # 98mm diameter x 151mm height
         self.input_voltage_v = 24.0          # 24VDC regulated input
         self.power_avg_w = 15.0              # 15W average consumption
@@ -589,6 +720,237 @@ class GimbalState:
                 self.path_from = 0
                 self.path_to = min(1, num_points)
             logger.info("Path mode activated via PATH packet (0xD7) with %d points", len(self.path_points))
+
+        elif packet.packet_id == OrionPktType.CROWN_VERSION:
+            return self.get_crown_version_packet()
+
+        elif packet.packet_id == OrionPktType.CLEVIS_VERSION:
+            return self.get_clevis_version_packet()
+
+        elif packet.packet_id == OrionPktType.PAYLOAD_VERSION:
+            return self.get_payload_version_packet()
+
+        elif packet.packet_id == OrionPktType.TRACKER_VERSION:
+            return self.get_tracker_version_packet()
+
+        elif packet.packet_id == OrionPktType.LENSCTL_VERSION:
+            return self.get_lensctl_version_packet()
+
+        elif packet.packet_id == OrionPktType.RETRACT_VERSION:
+            return self.get_retract_version_packet()
+
+        elif packet.packet_id == OrionPktType.PRODUCT:
+            return self.get_product_packet()
+
+        elif packet.packet_id == OrionPktType.BOARD:
+            b_enum = packet.data[0] if len(packet.data) >= 1 else 2
+            return self.get_board_packet(b_enum)
+
+        elif packet.packet_id == OrionPktType.BOARD_HEARTBEAT:
+            return self.get_board_heartbeat_packet()
+
+        elif packet.packet_id == OrionPktType.FLIR_SETTINGS:
+            if len(packet.data) >= 2:
+                bf1 = packet.data[1]
+                self.flir_disable_sffc = (bf1 >> 7) & 1
+                self.flir_palette = (bf1 >> 4) & 0x07
+                self.flir_nuc_type = (bf1 >> 1) & 0x07
+                self.flir_black_hot = bf1 & 0x01
+            if len(packet.data) >= 3:
+                self.flir_max_agc_gain = packet.data[2]
+            if len(packet.data) >= 4:
+                self.flir_ace_level = struct.unpack_from(">b", packet.data, 3)[0]
+            if len(packet.data) >= 5:
+                self.flir_dde_threshold = packet.data[4]
+            if len(packet.data) >= 6:
+                self.flir_agc_midpoint = packet.data[5]
+            if len(packet.data) >= 7:
+                self.flir_integration_time = 1.0 + (packet.data[6] / 8.793103448275861)
+            if len(packet.data) >= 8:
+                self.flir_agc_type = packet.data[7]
+            if len(packet.data) >= 9:
+                self.flir_agc_gamma = 0.5 + (packet.data[8] / 72.85714285714286)
+            if len(packet.data) >= 10:
+                self.flir_agc_linear_percent = packet.data[9] / 2.55
+            if len(packet.data) >= 11:
+                self.flir_tce_enable = (packet.data[10] >> 7) & 1
+            if len(packet.data) >= 12:
+                self.flir_tce_gamma = packet.data[11]
+            if len(packet.data) >= 13:
+                self.flir_tce_clip_limit = packet.data[12]
+            if len(packet.data) >= 14:
+                self.flir_tce_alpha = packet.data[13]
+            return self.get_flir_settings_packet()
+
+        elif packet.packet_id == OrionPktType.LYNRED_SETTINGS:
+            if len(packet.data) >= 3:
+                bf = struct.unpack_from(">H", packet.data, 1)[0]
+                self.lynred_contrast_mode = (bf >> 15) & 1
+                self.lynred_ice_moving_avg = (bf >> 6) & 0x1FF
+            if len(packet.data) >= 4:
+                self.lynred_ice_min_thresh = packet.data[3]
+            if len(packet.data) >= 5:
+                self.lynred_ice_max_thresh = packet.data[4]
+            return self.get_lynred_settings_packet()
+
+        elif packet.packet_id == OrionPktType.UNIFIED_CAM_ERR_SETTINGS:
+            if len(packet.data) >= 1:
+                num = packet.data[0]
+                new_errs = []
+                offset = 1
+                for _ in range(num):
+                    if offset + 4 <= len(packet.data):
+                        p_raw, t_raw = struct.unpack_from(">hh", packet.data, offset)
+                        new_errs.append((p_raw / 20860.12008116854, t_raw / 20860.12008116854))
+                        offset += 4
+                if new_errs:
+                    self.cam_errors = new_errs
+            return self.get_unified_cam_err_settings_packet()
+
+        elif packet.packet_id == OrionPktType.TRACK_CMD:
+            if len(packet.data) >= 1:
+                cmd = packet.data[0]
+                target_pan = 0.0
+                target_tilt = 0.0
+                track_idx = 0
+                resize = 0.0
+                if len(packet.data) >= 5:
+                    p_raw, t_raw = struct.unpack_from(">hh", packet.data, 1)
+                    target_pan = p_raw / 1000.0
+                    target_tilt = t_raw / 1000.0
+                if len(packet.data) >= 9:
+                    track_idx = struct.unpack_from(">i", packet.data, 5)[0]
+                if len(packet.data) >= 11:
+                    resize = struct.unpack_from(">h", packet.data, 9)[0] / 1000.0
+
+                if cmd in (0, 1):  # TRACK_START_PRIMARY, TRACK_START_SECONDARY
+                    self.mode = OrionMode.TRACK
+                    self.primary_track["active"] = True
+                    self.primary_track["pan"] = target_pan
+                    self.primary_track["tilt"] = target_tilt
+                    self.primary_track["id"] = max(1, self.primary_track["id"] + 1)
+                    if cmd == 1:
+                        self.active_tracks[track_idx] = {
+                            "id": track_idx, "pan": target_pan, "tilt": target_tilt, "active": True
+                        }
+                elif cmd == 2:  # TRACK_STOP_ALL
+                    self.mode = OrionMode.RATE
+                    self.primary_track["active"] = False
+                    self.active_tracks.clear()
+                elif cmd == 3:  # TRACK_STOP_ALL_BUT_PRIMARY
+                    self.active_tracks.clear()
+                elif cmd in (4, 6):  # TRACK_NUDGE_PRIMARY, TRACK_NUDGE_BY_INDEX
+                    if cmd == 4:
+                        self.primary_track["pan"] += target_pan
+                        self.primary_track["tilt"] += target_tilt
+                    elif track_idx in self.active_tracks:
+                        self.active_tracks[track_idx]["pan"] += target_pan
+                        self.active_tracks[track_idx]["tilt"] += target_tilt
+                elif cmd in (5, 7):  # TRACK_RESIZE_PRIMARY, TRACK_RESIZE_BY_INDEX
+                    if cmd == 5:
+                        self.primary_track["size"] = max(0.01, self.primary_track.get("size", 0.05) + resize)
+                    elif track_idx in self.active_tracks:
+                        self.active_tracks[track_idx]["size"] = max(0.01, self.active_tracks[track_idx].get("size", 0.05) + resize)
+                elif cmd == 8:  # TRACK_REMOVE_BY_INDEX
+                    self.active_tracks.pop(track_idx, None)
+                    if track_idx == 0:
+                        self.primary_track["active"] = False
+            return self.get_geo_track_status_packet()
+
+        elif packet.packet_id == OrionPktType.GEO_TRACK_STATUS:
+            idx = packet.data[0] if len(packet.data) >= 1 else 0
+            return self.get_geo_track_status_packet(idx)
+
+        elif packet.packet_id == OrionPktType.TLE_COMMAND:
+            if len(packet.data) >= 2:
+                self.tle_filter_type = packet.data[0]
+                self.tle_running = bool(packet.data[1])
+            return self.get_tle_status_packet()
+
+        elif packet.packet_id == OrionPktType.TLE_STATUS:
+            return self.get_tle_status_packet()
+
+        elif packet.packet_id == OrionPktType.VIDEORECORD_CMD:
+            if len(packet.data) >= 1:
+                bf = packet.data[0]
+                udp_en = bool(bf & 0x80)
+                rec_en = bool(bf & 0x40)
+                del_all = bool(bf & 0x08)
+                if rec_en and udp_en:
+                    self.videorecord_state = 2
+                elif rec_en:
+                    self.videorecord_state = 1
+                elif udp_en:
+                    self.videorecord_state = 3
+                else:
+                    self.videorecord_state = 0
+                if del_all:
+                    self.videorecord_disk_consumption = 0.01
+            if len(packet.data) >= 7:
+                self.videorecord_udp_dest_ip, self.videorecord_udp_dest_port = struct.unpack_from(">IH", packet.data, 1)
+            return self.get_videorecord_status_packet()
+
+        elif packet.packet_id == OrionPktType.VIDEORECORD_STATUS:
+            return self.get_videorecord_status_packet()
+
+        elif packet.packet_id == OrionPktType.VIDEORECORD_CLOCK:
+            return self.get_videorecord_clock_packet()
+
+        elif packet.packet_id == OrionPktType.RANGE_DATA:
+            if len(packet.data) >= 7:
+                rng_raw, age, src = struct.unpack_from(">IHB", packet.data, 0)
+                self.slant_range = rng_raw / 100.0
+                self.slant_range_max_age_ms = age
+                self.slant_range_source = src
+                self.slant_range_time = self.uptime
+                logger.info("Range data received: %.2fm (source=%d, age=%dms)", self.slant_range, src, age)
+
+        elif packet.packet_id == OrionPktType.INS_OPTIONS:
+            if len(packet.data) >= 1:
+                self.ins_platform_rotation = bool(packet.data[0] & 0x80)
+            if len(packet.data) >= 10:
+                r, p, y = struct.unpack_from(">hhh", packet.data, 4)
+                self.ins_euler = [r / 10430.06004058, p / 10430.06004058, y / 10430.06004058]
+            if len(packet.data) >= 12:
+                init_hdg = struct.unpack_from(">h", packet.data, 10)[0]
+                self.ins_initial_heading = init_hdg / 10430.06004058
+            if len(packet.data) >= 18:
+                ax, ay, az = struct.unpack_from(">hhh", packet.data, 12)
+                self.ins_gps_lever_arm = [ax / 1000.0, ay / 1000.0, az / 1000.0]
+            return self.get_ins_options_packet()
+
+        elif packet.packet_id == OrionPktType.INS_QUALITY:
+            return self.get_ins_quality_packet()
+
+        elif packet.packet_id == OrionPktType.CROWN_MODE:
+            if len(packet.data) >= 1:
+                self.crown_mode = packet.data[0]
+            return self.get_crown_mode_packet()
+
+        elif packet.packet_id == OrionPktType.NETWORK_SETTINGS:
+            if len(packet.data) >= 18:
+                self.net_ip, self.net_mask, self.net_gateway, self.net_low_delay, self.net_mtu, self.net_secondary_port, self.net_low_bandwidth, self.net_max_clients = struct.unpack_from(">IIIBHHBB", packet.data, 0)
+            return self.get_network_settings_packet()
+
+        elif packet.packet_id == OrionPktType.RETRACT_CMD:
+            if len(packet.data) >= 1:
+                self.retract_cmd = packet.data[0]
+                self.retract_state = 1 if self.retract_cmd == 1 else 0
+            return self.get_retract_status_packet()
+
+        elif packet.packet_id == OrionPktType.RETRACT_STATUS:
+            return self.get_retract_status_packet()
+
+        elif packet.packet_id == OrionPktType.GEOID_UNDULATION:
+            if len(packet.data) >= 2:
+                und_raw = struct.unpack_from(">h", packet.data, 0)[0]
+                self.geoid_undulation = und_raw / 100.0
+
+        elif packet.packet_id == OrionPktType.AUTOPILOT_DATA:
+            if len(packet.data) >= 12:
+                ias, tas = struct.unpack_from(">ff", packet.data, 4)
+                if ias > 0:
+                    self.aircraft_speed = ias * 1.94384
             
         return None
 
@@ -993,8 +1355,263 @@ class GimbalState:
         data.extend(struct.pack(">ii", 0, 0))  # imageShifts
         data.extend(struct.pack(">HB", 0, 0))  # imageShiftDeltaTime, imageShiftConfidence
         data.extend(struct.pack(">hh", 0, 0))  # outputShifts
-        data.extend(struct.pack(">BBbbB", 0, 18, 0, 0, 0))  # rangeSource, leapSeconds, panAlignment, tiltAlignment, insRotationOption
+        range_source = self.slant_range_source if self.slant_range > 0 and (self.uptime - self.slant_range_time < self.slant_range_max_age_ms / 1000.0) else 0
+        ins_rot_opt = 1 if self.ins_platform_rotation else 0
+        data.extend(struct.pack(">BBbbB", range_source, 18, 0, 0, ins_rot_opt))  # rangeSource, leapSeconds, panAlignment, tiltAlignment, insRotationOption
         data.extend(struct.pack(">h", 0))  # imageRotation
         data.extend(struct.pack(">bB", self.camera_id, 0))  # cameraIndex, hasTrackData
 
         return OrionPacket(OrionPktType.GEOLOCATE_TELEMETRY_CORE, bytes(data)).encode()
+
+    def get_crown_version_packet(self) -> bytes:
+        data = struct.pack(
+            ">16s16sI",
+            _encode_fixed_string(self.crown_version, 16),
+            _encode_fixed_string(self.crown_part_number, 16),
+            int(self.uptime / 60.0),
+        )
+        return OrionPacket(OrionPktType.CROWN_VERSION, data).encode()
+
+    def get_clevis_version_packet(self) -> bytes:
+        data = struct.pack(
+            ">16s16sI",
+            _encode_fixed_string(self.clevis_version, 16),
+            _encode_fixed_string(self.clevis_part_number, 16),
+            int(self.uptime / 60.0),
+        )
+        return OrionPacket(OrionPktType.CLEVIS_VERSION, data).encode()
+
+    def get_payload_version_packet(self) -> bytes:
+        data = struct.pack(
+            ">24s16sIbb",
+            _encode_fixed_string(self.payload_version, 24),
+            _encode_fixed_string(self.payload_part_number, 16),
+            int(self.uptime / 60.0),
+            self.payload_hw_type,
+            self.payload_hw_rev,
+        )
+        return OrionPacket(OrionPktType.PAYLOAD_VERSION, data).encode()
+
+    def get_tracker_version_packet(self) -> bytes:
+        data = struct.pack(
+            ">16s16sI",
+            _encode_fixed_string(self.tracker_version, 16),
+            _encode_fixed_string(self.tracker_part_number, 16),
+            self.tracker_app_bits,
+        )
+        return OrionPacket(OrionPktType.TRACKER_VERSION, data).encode()
+
+    def get_lensctl_version_packet(self) -> bytes:
+        data = struct.pack(">16s", _encode_fixed_string(self.lensctl_version, 16))
+        return OrionPacket(OrionPktType.LENSCTL_VERSION, data).encode()
+
+    def get_retract_version_packet(self) -> bytes:
+        data = struct.pack(">16s", _encode_fixed_string(self.retract_version, 16))
+        return OrionPacket(OrionPktType.RETRACT_VERSION, data).encode()
+
+    def get_product_packet(self) -> bytes:
+        data = struct.pack(
+            ">16sI64s",
+            _encode_fixed_string(self.part_number, 16),
+            self.serial_number,
+            _encode_fixed_string(self.model_name, 64),
+        )
+        return OrionPacket(OrionPktType.PRODUCT, data).encode()
+
+    def get_board_packet(self, board_enum: int = 2) -> bytes:
+        mfg_date = (24 << 9) | (5 << 5) | 1  # 2024-05-01
+        cal_date = (24 << 9) | (5 << 5) | 1
+        data = struct.pack(
+            ">III3sBHH",
+            self.serial_number + board_enum,
+            self.serial_number,
+            0,
+            b"\x00\x00\x00",
+            board_enum,
+            mfg_date,
+            cal_date,
+        )
+        return OrionPacket(OrionPktType.BOARD, data).encode()
+
+    def get_board_heartbeat_packet(self) -> bytes:
+        data = struct.pack(">BB", 2, 0xFC)
+        return OrionPacket(OrionPktType.BOARD_HEARTBEAT, data).encode()
+
+    def get_flir_settings_packet(self) -> bytes:
+        bf1 = ((self.flir_disable_sffc & 1) << 7) | ((self.flir_palette & 0x07) << 4) | ((self.flir_nuc_type & 0x07) << 1) | (self.flir_black_hot & 1)
+        integ_encoded = int(round((max(1.0, min(30.0, self.flir_integration_time)) - 1.0) * 8.793103448275861))
+        gamma_encoded = int(round((max(0.5, min(4.0, self.flir_agc_gamma)) - 0.5) * 72.85714285714286))
+        lin_encoded = int(round(max(0.0, min(100.0, self.flir_agc_linear_percent)) * 2.55))
+        bf_tce = (self.flir_tce_enable & 1) << 7
+        cam_idx = 1 if len(self.cameras) > 1 else 0xFF
+        data = struct.pack(
+            ">BBbBBBBBBBBBBB",
+            cam_idx,
+            bf1,
+            self.flir_max_agc_gain,
+            self.flir_ace_level,
+            self.flir_dde_threshold,
+            self.flir_agc_midpoint,
+            integ_encoded,
+            self.flir_agc_type,
+            gamma_encoded,
+            lin_encoded,
+            bf_tce,
+            self.flir_tce_gamma,
+            self.flir_tce_clip_limit,
+            self.flir_tce_alpha,
+        )
+        return OrionPacket(OrionPktType.FLIR_SETTINGS, data).encode()
+
+    def get_lynred_settings_packet(self) -> bytes:
+        bf = ((self.lynred_contrast_mode & 1) << 15) | ((self.lynred_ice_moving_avg & 0x1FF) << 6)
+        cam_idx = 1 if len(self.cameras) > 1 else 0xFF
+        data = struct.pack(">BHBB", cam_idx, bf, self.lynred_ice_min_thresh, self.lynred_ice_max_thresh)
+        return OrionPacket(OrionPktType.LYNRED_SETTINGS, data).encode()
+
+    def get_unified_cam_err_settings_packet(self) -> bytes:
+        num_cams = len(self.cameras)
+        data = bytearray([num_cams])
+        for i in range(num_cams):
+            pan_rad, tilt_rad = self.cam_errors[i] if i < len(self.cam_errors) else (0.0, 0.0)
+            p_raw = int(round(pan_rad * 20860.12008116854))
+            t_raw = int(round(tilt_rad * 20860.12008116854))
+            p_raw = max(-32768, min(32767, p_raw))
+            t_raw = max(-32768, min(32767, t_raw))
+            data.extend(struct.pack(">hh", p_raw, t_raw))
+        return OrionPacket(OrionPktType.UNIFIED_CAM_ERR_SETTINGS, bytes(data)).encode()
+
+    def get_geo_track_status_packet(self, index: int = 0) -> bytes:
+        track = self.primary_track if index == 0 else self.active_tracks.get(index, {"id": index, "status": 0, "active": False})
+        lat_rad = math.radians(self.gps_lat)
+        lon_rad = math.radians(self.gps_lon)
+        alt_m = self.gps_alt
+
+        lat_raw = max(-2147483648, min(2147483647, int(round(lat_rad * 1367130550.516243))))
+        lon_raw = max(-2147483648, min(2147483647, int(round(lon_rad * 683565275.2581217))))
+        alt_raw = max(-8388608, min(8388607, int(round(alt_m * 100.0))))
+        alt_s24 = alt_raw.to_bytes(3, byteorder='big', signed=True)
+
+        status_byte = 1 if track.get("active", False) else 0
+        state_byte = 1 if track.get("active", False) else 0
+
+        data = bytearray()
+        data.extend(struct.pack(">BIBii", index, track.get("id", 1), status_byte, lat_raw, lon_raw))
+        data.extend(alt_s24)
+        data.extend(struct.pack(">hhhhhh", 0, 0, 0, 0, 0, 0))
+        data.extend(struct.pack(">iii", 0, 0, 0))
+        data.extend(struct.pack(">HHH", 0, 0, 0))
+        data.extend(struct.pack(">Bh", state_byte, 0))
+        return OrionPacket(OrionPktType.GEO_TRACK_STATUS, bytes(data)).encode()
+
+    def get_videorecord_status_packet(self) -> bytes:
+        ver_bytes = _encode_fixed_string("1.0.0", 16)
+        cams_info = bytearray()
+        for i in range(3):
+            status = 1 if i < len(self.cameras) else 0
+            stream_id = i
+            bitrate = 4000 if i < len(self.cameras) else 0
+            framestats = 1000
+            cams_info.extend(struct.pack(">BBHh", status, stream_id, bitrate, framestats))
+
+        udp_en = 1 if self.videorecord_state in (2, 3) else 0
+        rec_en = 1 if self.videorecord_state in (1, 2) else 0
+        obr_en = 1 if (udp_en or rec_en) else 0
+        bf = (udp_en << 7) | (rec_en << 6) | (1 << 5) | (1 << 4) | (obr_en << 3)
+        disk_raw = int(round(self.videorecord_disk_consumption * 10000.0))
+
+        data = bytearray()
+        data.extend(ver_bytes)
+        data.extend(cams_info)
+        data.extend(struct.pack(
+            ">BIHIBBhBB",
+            bf,
+            self.videorecord_udp_dest_ip,
+            self.videorecord_udp_dest_port,
+            self.videorecord_bitrate,
+            self.videorecord_klv_mode,
+            self.videorecord_state,
+            disk_raw,
+            0,
+            0,
+        ))
+        return OrionPacket(OrionPktType.VIDEORECORD_STATUS, bytes(data)).encode()
+
+    def get_videorecord_clock_packet(self) -> bytes:
+        pts = int(self.uptime * 90000)
+        data = struct.pack(">QQB", pts, pts, self.camera_id)
+        return OrionPacket(OrionPktType.VIDEORECORD_CLOCK, data).encode()
+
+    def get_ins_options_packet(self) -> bytes:
+        b0 = 0x80 if self.ins_platform_rotation else 0x00
+        e_roll = int(round(self.ins_euler[0] * 10430.06004058))
+        e_pitch = int(round(self.ins_euler[1] * 10430.06004058))
+        e_yaw = int(round(self.ins_euler[2] * 10430.06004058))
+        init_hdg = int(round(self.ins_initial_heading * 10430.06004058))
+        arm_x = int(round(self.ins_gps_lever_arm[0] * 1000.0))
+        arm_y = int(round(self.ins_gps_lever_arm[1] * 1000.0))
+        arm_z = int(round(self.ins_gps_lever_arm[2] * 1000.0))
+        data = struct.pack(">BBBBhhhhhhhh", b0, 0, 0, 0, e_roll, e_pitch, e_yaw, init_hdg, arm_x, arm_y, arm_z, 0)
+        return OrionPacket(OrionPktType.INS_OPTIONS, data).encode()
+
+    def get_ins_quality_packet(self) -> bytes:
+        uptime_ms = int(self.uptime * 1000)
+        gps_src = 1
+        imu_type = 2
+        b_src = (gps_src << 5) | (imu_type & 0x07)
+        ins_mode = self.ins_quality_mode
+        flags = 0x80 | 0x40 | 0x20
+        data = struct.pack(
+            ">IBBBBBHHHHHHHHHHHH",
+            uptime_ms,
+            b_src,
+            ins_mode,
+            flags,
+            10,
+            10,
+            0, 0, 0,
+            10, 10, 20,
+            10, 10, 20,
+            200, 200, 400,
+        )
+        return OrionPacket(OrionPktType.INS_QUALITY, data).encode()
+
+    def get_crown_mode_packet(self) -> bytes:
+        data = struct.pack(">B", self.crown_mode)
+        return OrionPacket(OrionPktType.CROWN_MODE, data).encode()
+
+    def get_retract_status_packet(self) -> bytes:
+        pos_raw = int(round(self.retract_pos * 1000.0))
+        data = struct.pack(">BBhH", self.retract_cmd, self.retract_state, pos_raw, self.retract_flags)
+        return OrionPacket(OrionPktType.RETRACT_STATUS, data).encode()
+
+    def get_network_settings_packet(self) -> bytes:
+        data = struct.pack(
+            ">IIIBHHBB",
+            self.net_ip,
+            self.net_mask,
+            self.net_gateway,
+            self.net_low_delay,
+            self.net_mtu,
+            self.net_secondary_port,
+            self.net_low_bandwidth,
+            self.net_max_clients,
+        )
+        return OrionPacket(OrionPktType.NETWORK_SETTINGS, data).encode()
+
+    def get_tle_status_packet(self) -> bytes:
+        uptime_ms = int(self.uptime * 1000)
+        filter_type = self.tle_filter_type
+        state = 1 if self.tle_running else 0
+        lat_rad = math.radians(self.gps_lat)
+        lon_rad = math.radians(self.gps_lon)
+        alt_m = self.gps_alt
+        lat_raw = max(-2147483648, min(2147483647, int(round(lat_rad * 1367130550.516243))))
+        lon_raw = max(-2147483648, min(2147483647, int(round(lon_rad * 683565275.2581217))))
+        alt_raw = max(-8388608, min(8388607, int(round(alt_m * 100.0))))
+        alt_s24 = alt_raw.to_bytes(3, byteorder='big', signed=True)
+        data = bytearray()
+        data.extend(struct.pack(">IBBHHii", uptime_ms, filter_type, state, 0, 10, lat_raw, lon_raw))
+        data.extend(alt_s24)
+        data.extend(struct.pack(">hhhhhhhhhHHHBB", 10, 10, 15, 10, 10, 0, 0, 0, 0, 10, 10, 10, 100, 0))
+        return OrionPacket(OrionPktType.TLE_STATUS, bytes(data)).encode()

@@ -47,7 +47,7 @@ class OrionServer:
                  pan: float = 0.0, tilt: Optional[float] = None, heading: float = 0.0,
                  speed: float = 0.0, tile_cache_dir: Optional[str] = "cache/tiles",
                  gpu_encoding: Optional[bool] = None, drape_subsample: int = 6,
-                 distance_lod: bool = True):
+                 distance_lod: bool = True, model: str = "HD40-XV"):
         self.host = host
         self.port = port
         self.udp_port = port
@@ -61,6 +61,7 @@ class OrionServer:
         self.initial_tilt = tilt
         self.initial_heading = heading
         self.initial_speed = speed
+        self.model = model
         self.terrain = TerrainEngine(dted_path)
         self.state = GimbalState(
             dt, 
@@ -71,7 +72,8 @@ class OrionServer:
             pan=pan,
             tilt=tilt,
             heading=heading,
-            speed=speed
+            speed=speed,
+            model=model
         )
         self.engine = ProtocolEngine()
         self.clients: Set[Tuple[str, int]] = set()  # UDP clients
@@ -240,6 +242,39 @@ class OrionServer:
                 details.append("mode=ORION_MODE_GEOPOINT (0x60)")
         elif packet.packet_id == OrionPktType.PATH:
             details.append(f"mode=ORION_MODE_PATH (0x70), payload={len(packet.data)} bytes")
+        elif packet.packet_id in (OrionPktType.CROWN_VERSION, OrionPktType.CLEVIS_VERSION, OrionPktType.PAYLOAD_VERSION, OrionPktType.TRACKER_VERSION, OrionPktType.LENSCTL_VERSION, OrionPktType.RETRACT_VERSION):
+            details.append("version query")
+        elif packet.packet_id == OrionPktType.PRODUCT:
+            details.append("product info query")
+        elif packet.packet_id == OrionPktType.BOARD:
+            details.append(f"board info query (board_enum={packet.data[0] if len(packet.data) >= 1 else 2})")
+        elif packet.packet_id == OrionPktType.TRACK_CMD:
+            if len(packet.data) >= 1:
+                cmd = packet.data[0]
+                details.append(f"track_cmd={cmd}")
+        elif packet.packet_id == OrionPktType.FLIR_SETTINGS:
+            if len(packet.data) >= 2:
+                pal = (packet.data[1] >> 4) & 0x07
+                details.append(f"flir_settings: palette={pal}")
+            else:
+                details.append("flir_settings query")
+        elif packet.packet_id == OrionPktType.VIDEORECORD_CMD:
+            details.append(f"videorecord_cmd ({len(packet.data)} bytes)")
+        elif packet.packet_id == OrionPktType.RANGE_DATA:
+            if len(packet.data) >= 7:
+                rng_raw = struct.unpack_from(">I", packet.data, 0)[0]
+                details.append(f"range={rng_raw / 100.0:.1f}m")
+        elif packet.packet_id == OrionPktType.INS_OPTIONS:
+            details.append("ins_options")
+        elif packet.packet_id == OrionPktType.CROWN_MODE:
+            if len(packet.data) >= 1:
+                details.append(f"crown_mode={packet.data[0]}")
+            else:
+                details.append("crown_mode query")
+        elif packet.packet_id == OrionPktType.NETWORK_SETTINGS:
+            details.append("network_settings")
+        elif packet.packet_id in (OrionPktType.RETRACT_CMD, OrionPktType.RETRACT_STATUS):
+            details.append("retract")
 
         detail_str = f" ({', '.join(details)})" if details else ""
         return f"{pkt_name} [0x{packet.packet_id:02X}, len={len(packet.data)}]{detail_str}"
@@ -550,6 +585,8 @@ if __name__ == "__main__":
     parser.add_argument("--drape-subsample", type=int, default=6, help="Screen ray marching subsampling factor for 3D terrain (default: 6)")
     parser.add_argument("--distance-lod", dest="distance_lod", action="store_true", default=True, help="Enable distance-dependent tile Level of Detail (LOD, lower zoom for distant tiles)")
     parser.add_argument("--no-distance-lod", dest="distance_lod", action="store_false", help="Disable distance-dependent tile Level of Detail (force uniform zoom)")
+    parser.add_argument("--model", type=str, choices=["HD40-XV", "HD40-LV"], default="HD40-XV",
+                        help="Gimbal model selection: HD40-XV (default single-sensor EO) or HD40-LV (dual-sensor EO+LWIR)")
     args = parser.parse_args()
 
     server = OrionServer(
@@ -581,7 +618,8 @@ if __name__ == "__main__":
         tile_cache_dir=args.tile_cache_dir,
         gpu_encoding=args.gpu_encoding,
         drape_subsample=args.drape_subsample,
-        distance_lod=args.distance_lod
+        distance_lod=args.distance_lod,
+        model=args.model
     )
 
     try:

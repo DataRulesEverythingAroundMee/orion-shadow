@@ -206,8 +206,7 @@ class TileVisualizer:
 
         rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov)
 
-        limit_range = float(max_ground_range) if max_ground_range else 65000.0
-        limit_range = max(1000.0, min(65000.0, limit_range))
+        limit_range = max(65000.0, float(max_ground_range or 65000.0))
 
         # Check near-ground visibility from bottom rays
         # If both bottom rays point into the sky or horizontal, no ground is visible

@@ -255,15 +255,41 @@ class TestGeopointMode(unittest.TestCase):
             pkt = OrionPacket(OrionPktType.GEOPOINT_CMD, payload).encode()
             client_sock.sendall(pkt)
 
-            # Read response
+            # Read response (handling potential interleaved telemetry packets)
             client_sock.settimeout(2.0)
-            resp_buf = client_sock.recv(1024)
+            buf = bytearray()
+            found_pkt = False
+            start_t = time.time()
+            while time.time() - start_t < 2.0:
+                try:
+                    chunk = client_sock.recv(1024)
+                    if not chunk:
+                        break
+                    buf.extend(chunk)
+                    while len(buf) >= 6:
+                        idx = buf.find(b"\xD0\x0D")
+                        if idx < 0:
+                            buf.clear()
+                            break
+                        if idx > 0:
+                            del buf[:idx]
+                        if len(buf) < 4:
+                            break
+                        pkt_len = buf[3]
+                        total_len = 4 + pkt_len + 2
+                        if len(buf) < total_len:
+                            break
+                        if buf[2] == OrionPktType.GEOPOINT_CMD:
+                            found_pkt = True
+                            break
+                        del buf[:total_len]
+                    if found_pkt:
+                        break
+                except socket.timeout:
+                    break
             client_sock.close()
 
-            self.assertGreaterEqual(len(resp_buf), 6)
-            self.assertEqual(resp_buf[0], 0xD0)
-            self.assertEqual(resp_buf[1], 0x0D)
-            self.assertEqual(resp_buf[2], OrionPktType.GEOPOINT_CMD)
+            self.assertTrue(found_pkt, "Did not receive OrionPktType.GEOPOINT_CMD acknowledgment")
 
             # Server state should be in GEOPOINT mode with center locked
             self.assertEqual(server.state.mode, OrionMode.GEOPOINT)
