@@ -20,6 +20,24 @@ The **OrionShadow** replicates the communication behavior of an Orion gimbal by 
 
 ---
 
+## 📚 Comprehensive Documentation
+
+For complete technical specifications, architectural diagrams, mathematical derivations, and integration guides, visit the **[Documentation Hub](docs/README.md)**:
+
+• **[Architecture & Concurrency](docs/architecture.md)**: Event loops, async workers, and telemetry broadcast pipeline.  
+• **[Protocol & Network Specification](docs/protocol_network.md)**: Big-endian packet framing, Fletcher-251 checksum, and packet dictionary.  
+• **[Physics & State Machine](docs/physics_state_machine.md)**: HD40-XV mechanical model, modes (`RATE`, `POSITION`, `GEOPOINT`), and Euler dynamics.  
+• **[Terrain & Geospatial Engine](docs/terrain_geospatial.md)**: DTED parsing, WGS84 geodesy, and ray-cast target geolocation.  
+• **[Synthetic Video & Rendering](docs/video_rendering.md)**: 2D tiles, 3D relief draping, HUD overlays, and FFmpeg/NVENC multicast.  
+• **[Camera, Payloads & Tracking](docs/camera_payloads_tracking.md)**: 1x–112x zoom optics, KTnC camera protocol, video tracking, and faults.  
+• **[ADS-B Live Flight Bridge](docs/adsb_integration.md)**: Attaching the gimbal to live real-world flights using open ADS-B feeds.  
+• **[CLI & Configuration Reference](docs/cli_configuration.md)**: Complete CLI options, runner scripts, and performance tuning.  
+• **[Integration Guide](docs/integration_guide.md)**: Connecting Orion SDK (C++ and Python), Wireshark Lua dissector, and VLC/ffplay.  
+• **[Testing & Development](docs/testing_development.md)**: Test runner architecture (`scripts/pytest`), mock data, and test inventory.  
+• **[Technical Reference Card](docs/technical_reference.md)**: Quick-reference cheat sheet for packet structures and ports.  
+
+---
+
 ## 🛠 Architecture
 
 The simulator is built as a modular Python application composed of several key layers:
