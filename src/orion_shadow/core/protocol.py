@@ -49,6 +49,7 @@ class OrionPktType:
     EXT_HEADING_DATA = 0xD2
     GEOLOCATE_TELEMETRY_CORE = 0xD4
     GEOPOINT_CMD = 0xD5
+    PATH = 0xD7
     UNIFIED_CAM_ERR_SETTINGS = 0xFD
 
 class OrionMode:
@@ -56,8 +57,13 @@ class OrionMode:
     FAULT = 0x01
     RATE = 0x10
     GEO_RATE = 0x11
+    FFC_AUTO = 0x20
+    FFC = 0x20
+    FFC_MANUAL = 0x21
     SCENE = 0x30
     TRACK = 0x31
+    NUDGE_TRACK = 0x32
+    SECONDARY_TRACK = 0x33
     CALIBRATION = 0x40
     NULL_GYROS = 0x41
     POSITION = 0x50
@@ -65,6 +71,7 @@ class OrionMode:
     GEOPOINT = 0x60
     PATH = 0x70
     DOWN = 0x71
+    UNKNOWN = 0xFF
 
 import logging
 

@@ -48,6 +48,17 @@ class GimbalState:
         self.geopoint_joystick_range = 0.0
         self.geopoint_options = 0
         
+        # Additional Operational Mode State
+        self.track_box = (0.0, 0.0)
+        self.ffc_active = False
+        self.gyro_calibrated = False
+        self.calibration_active = False
+        self.path_points = []
+        self.path_progress = 0.0
+        self.stare_time = 0.0
+        self.path_from = 0
+        self.path_to = 0
+
         # Camera State (Trillium HD40-XV Single Visible Camera Setup)
         self.camera_zoom = 1.0
         self.camera_focus = 0.0
@@ -150,6 +161,22 @@ class GimbalState:
             return float(self.physics.tilt['pos'])
         return float(getattr(self, 'target_tilt', 0.0))
 
+    @property
+    def current_fov_deg(self) -> Tuple[float, float]:
+        if self.cameras:
+            cam = self.cameras[min(self.camera_id, len(self.cameras) - 1)]
+            min_focal = cam.get("min_focal", 4.3)
+            pixel_pitch = cam.get("pixel_pitch", 0.00297)
+            width = cam.get("width", 1280)
+            height = cam.get("height", 720)
+            max_zoom = cam.get("max_total_zoom", self.max_total_zoom)
+            zoom = max(1.0, min(self.camera_zoom, max_zoom))
+            focal = min_focal * zoom
+            hfov_deg = math.degrees(2.0 * math.atan2(0.5 * (width * pixel_pitch), focal))
+            vfov_deg = math.degrees(2.0 * math.atan2(0.5 * (height * pixel_pitch), focal))
+            return hfov_deg, vfov_deg
+        return 47.7, 28.0
+
     def update_from_command(self, packet: OrionPacket) -> Optional[OrionPacket]:
         if packet.packet_id == OrionPktType.INITIALIZE:
             self.initialized = True
@@ -188,8 +215,20 @@ class GimbalState:
                 if old_mode != mode:
                     logger.info("Gimbal operational mode changed: 0x%02X -> 0x%02X", old_mode, mode)
 
+                # Disabled mode: ORION_MODE_DISABLED (0x00)
+                if mode == 0x00:
+                    self.target_pan = self.current_pan
+                    self.target_tilt = self.current_tilt
+                    if hasattr(self, 'physics'):
+                        self.physics.pan["vel"] = 0.0
+                        self.physics.pan["acc"] = 0.0
+                        self.physics.tilt["vel"] = 0.0
+                        self.physics.tilt["acc"] = 0.0
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Disabled mode: motor output disabled")
+
                 # Rate modes: ORION_MODE_RATE (0x10), ORION_MODE_GEO_RATE (0x11), ORION_MODE_SCENE (0x30)
-                if mode in (0x10, 0x11, 0x30):
+                elif mode in (0x10, 0x11, 0x30):
                     pan_rate = math.degrees(pan_raw / 1000.0)   # deg/s
                     tilt_rate = math.degrees(tilt_raw / 1000.0) # deg/s
 
@@ -213,13 +252,77 @@ class GimbalState:
                             mode, pan_rate, tilt_rate, self.target_pan, self.target_tilt
                         )
 
-                # Position modes: ORION_MODE_POSITION (0x50), ORION_MODE_POSITION_NO_LIMITS (0x51)
-                elif mode in (0x50, 0x51):
+                # Flat field correction modes: ORION_MODE_FFC_AUTO (0x20), ORION_MODE_FFC_MANUAL (0x21)
+                elif mode == 0x20:  # ORION_MODE_FFC_AUTO / FFC
+                    self.ffc_active = True
+                    self.target_pan = 0.0
+                    self.target_tilt = min(25.0, self.tilt_max)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD FFC Auto mode: driving to blackbody position (pan=0, tilt=%.2f)", self.target_tilt)
+
+                elif mode == 0x21:  # ORION_MODE_FFC_MANUAL
+                    self.ffc_active = True
+                    pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
+                    self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
+                    self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD FFC Manual mode: driving to payload target (pan=%.2f, tilt=%.2f)", self.target_pan, self.target_tilt)
+
+                # Track mode: ORION_MODE_TRACK (0x31)
+                elif mode == 0x31:  # ORION_MODE_TRACK
+                    norm_x = max(-0.5, min(0.5, pan_raw / 1000.0))
+                    norm_y = max(-0.5, min(0.5, tilt_raw / 1000.0))
+                    self.track_box = (norm_x, norm_y)
+                    if self.tracking_mode == 0:
+                        self.tracking_mode = 2  # Point track
+                    hfov_deg, vfov_deg = self.current_fov_deg
+                    new_pan = self.target_pan + norm_x * hfov_deg
+                    new_tilt = self.target_tilt - norm_y * vfov_deg
+                    self.target_pan = (new_pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(new_pan, self.pan_max), self.pan_min)
+                    self.target_tilt = max(min(new_tilt, self.tilt_max), self.tilt_min)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(
+                            "CMD Track mode: track_box=(%.3f, %.3f) -> targets (pan=%.2f, tilt=%.2f)",
+                            norm_x, norm_y, self.target_pan, self.target_tilt
+                        )
+
+                # Gyro calibration modes: ORION_MODE_CALIBRATION (0x40), ORION_MODE_NULL_GYROS (0x41)
+                elif mode == 0x40:  # ORION_MODE_CALIBRATION
+                    self.calibration_active = True
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Calibration mode activated")
+
+                elif mode == 0x41:  # ORION_MODE_NULL_GYROS
+                    self.target_pan = self.current_pan
+                    self.target_tilt = self.current_tilt
+                    if hasattr(self, 'physics'):
+                        self.physics.pan["vel"] = 0.0
+                        self.physics.pan["acc"] = 0.0
+                        self.physics.tilt["vel"] = 0.0
+                        self.physics.tilt["acc"] = 0.0
+                    self.gyro_calibrated = True
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Null Gyros mode: holding position (pan=%.2f, tilt=%.2f)", self.target_pan, self.target_tilt)
+
+                # Position mode: ORION_MODE_POSITION (0x50)
+                elif mode == 0x50:
                     pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
                     self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(pan, self.pan_max), self.pan_min)
                     self.target_tilt = max(min(tilt, self.tilt_max), self.tilt_min)
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug("CMD Position mode 0x%02X: targets (pan=%.2f, tilt=%.2f)", mode, self.target_pan, self.target_tilt)
+
+                # Position no limits mode: ORION_MODE_POSITION_NO_LIMITS (0x51)
+                elif mode == 0x51:
+                    pan, tilt = math.degrees(pan_raw / 1000.0), math.degrees(tilt_raw / 1000.0)
+                    self.target_pan = (pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else pan
+                    self.target_tilt = tilt  # Bypasses soft pan/tilt limits
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Position No Limits mode 0x%02X: targets (pan=%.2f, tilt=%.2f)", mode, self.target_pan, self.target_tilt)
+
+                elif mode == 0x70:  # ORION_MODE_PATH
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("CMD Path mode activated")
 
                 elif mode == 0x71:  # ORION_MODE_DOWN
                     self.target_tilt = self.tilt_min
@@ -464,6 +567,28 @@ class GimbalState:
                     self.physics.tilt["vel"] = 0.0
 
             return self.get_geopoint_cmd_packet()
+
+        elif packet.packet_id == OrionPktType.PATH:
+            self.mode = OrionMode.PATH
+            if len(packet.data) >= 1:
+                num_points = packet.data[0]
+                point_down = bool(packet.data[1] & 0x01) if len(packet.data) >= 2 else False
+                if point_down or num_points == 0:
+                    self.target_tilt = self.tilt_min
+                self.path_points = []
+                offset = 2
+                for _ in range(min(num_points, 15)):
+                    if offset + 9 <= len(packet.data):
+                        x = int.from_bytes(packet.data[offset:offset+3], 'big', signed=True)
+                        y = int.from_bytes(packet.data[offset+3:offset+6], 'big', signed=True)
+                        z = int.from_bytes(packet.data[offset+6:offset+9], 'big', signed=True)
+                        self.path_points.append((x, y, z))
+                        offset += 9
+                self.path_progress = 0.0
+                self.stare_time = 0.0
+                self.path_from = 0
+                self.path_to = min(1, num_points)
+            logger.info("Path mode activated via PATH packet (0xD7) with %d points", len(self.path_points))
             
         return None
 
@@ -539,13 +664,47 @@ class GimbalState:
 
             self.target_pan, self.target_tilt = self.calculate_geopoint_pan_tilt()
 
-        self.physics.step(
-            self.target_pan, 
-            self.target_tilt, 
-            continuous_pan=self.pan_continuous,
-            tilt_min=self.tilt_min, 
-            tilt_max=self.tilt_max
-        )
+        # Mode-specific physics & motion updates
+        if self.mode == OrionMode.DISABLED:
+            # Motors unpowered - freeze velocities
+            if hasattr(self, 'physics'):
+                self.physics.pan["vel"] = 0.0
+                self.physics.pan["acc"] = 0.0
+                self.physics.tilt["vel"] = 0.0
+                self.physics.tilt["acc"] = 0.0
+        elif self.mode == OrionMode.CALIBRATION and getattr(self, 'calibration_active', False):
+            # Gentle calibration sweep
+            self.target_pan = (self.initial_pan + 5.0 * math.sin(self.uptime * 2.0))
+            self.target_tilt = (self.initial_tilt + 5.0 * math.cos(self.uptime * 2.0))
+            self.physics.step(
+                self.target_pan,
+                self.target_tilt,
+                continuous_pan=self.pan_continuous,
+                tilt_min=self.tilt_min,
+                tilt_max=self.tilt_max
+            )
+        elif self.mode == OrionMode.POSITION_NO_LIMITS:
+            self.physics.step(
+                self.target_pan,
+                self.target_tilt,
+                continuous_pan=self.pan_continuous,
+                tilt_min=-180.0,
+                tilt_max=180.0
+            )
+        else:
+            self.physics.step(
+                self.target_pan, 
+                self.target_tilt, 
+                continuous_pan=self.pan_continuous,
+                tilt_min=self.tilt_min, 
+                tilt_max=self.tilt_max
+            )
+
+        if self.mode == OrionMode.PATH and getattr(self, 'path_points', None):
+            self.path_progress = min(1.0, getattr(self, 'path_progress', 0.0) + 0.05 * self.dt)
+            if self.path_progress >= 1.0 and self.path_points:
+                self.path_from = len(self.path_points) - 1
+                self.path_to = len(self.path_points) - 1
         self.faults.apply_faults(self)
         if self.terrain and self.terrain.enabled:
             terrain_alt = self.terrain.get_elevation(self.gps_lat, self.gps_lon)
@@ -776,7 +935,7 @@ class GimbalState:
         # Mode: 1 if faulty, 0 if disabled, otherwise current state mode
         if self.is_faulty or bool(self.faults.active_faults):
             mode = 1
-        elif not self.initialized:
+        elif not self.initialized or getattr(self, 'mode', 0) == OrionMode.DISABLED:
             mode = 0
         else:
             mode = getattr(self, 'mode', 16)
@@ -826,7 +985,11 @@ class GimbalState:
         data.extend(struct.pack(">HH", int(round(hfov_rad * 10430.21919553)), int(round(vfov_rad * 10430.21919553))))
         data.extend(struct.pack(">hhh", los_x, los_y, los_z))  # losECEF
         data.extend(struct.pack(">HH", width, height))
-        data.extend(struct.pack(">BBBBB", mode, 0, 0, 0, 0))  # mode, pathProgress, stareTime, pathFrom, pathTo
+        path_progress_raw = int(round(max(0.0, min(1.0, getattr(self, 'path_progress', 0.0))) * 255.0))
+        stare_time_raw = int(round(max(0.0, min(2.55, getattr(self, 'stare_time', 0.0))) * 100.0))
+        path_from = getattr(self, 'path_from', 0) & 0xFF
+        path_to = getattr(self, 'path_to', 0) & 0xFF
+        data.extend(struct.pack(">BBBBB", mode, path_progress_raw, stare_time_raw, path_from, path_to))
         data.extend(struct.pack(">ii", 0, 0))  # imageShifts
         data.extend(struct.pack(">HB", 0, 0))  # imageShiftDeltaTime, imageShiftConfidence
         data.extend(struct.pack(">hh", 0, 0))  # outputShifts

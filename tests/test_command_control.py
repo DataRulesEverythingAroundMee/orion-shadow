@@ -119,5 +119,197 @@ class TestCommandControl(unittest.TestCase):
         self.assertEqual(state.camera_zoom, 5.0)
         self.assertEqual(state.target_tilt, -20.0)
 
+    def test_orion_cmd_geo_rate_mode(self):
+        """Verify that ORION_MODE_GEO_RATE (0x11) integrates slew rates, supports impulse time, echoes mode, and reports telemetry."""
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=10.0)
+
+        # 1. Pan rate = 10 deg/s (175 mrad/s), tilt rate = 0, Mode = 0x11 (ORION_MODE_GEO_RATE)
+        cmd_pan = struct.pack(">hhBBB", 175, 0, OrionMode.GEO_RATE, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_pan))
+        self.assertEqual(state.mode, OrionMode.GEO_RATE)
+        self.assertAlmostEqual(state.target_pan, 11.0, delta=0.05)
+        self.assertEqual(state.target_tilt, -20.0)
+
+        # 2. Tilt rate with impulse time (5 = 0.5s): tilt down at -10 deg/s (-175 mrad/s)
+        cmd_impulse = struct.pack(">hhBBBH", 0, -175, OrionMode.GEO_RATE, 0, 5, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_impulse))
+        # -20.0 + (-10.0 * 0.5) = -25.0
+        self.assertAlmostEqual(state.target_tilt, -25.0, delta=0.05)
+
+        # 3. Extended response echoes mode 0x11
+        cmd_ext = struct.pack(">hhBBBHB", 0, 0, OrionMode.GEO_RATE, 1, 0, 102, 0)
+        resp = state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_ext))
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp[8], OrionMode.GEO_RATE)
+
+        # 4. Geolocate telemetry reports mode 0x11 (17)
+        telemetry = state.get_geolocate_telemetry_core_packet()
+        self.assertEqual(telemetry[60], OrionMode.GEO_RATE)
+
+    def test_orion_cmd_scene_mode(self):
+        """Verify that ORION_MODE_SCENE (0x30) integrates slew rates, supports impulse time, echoes mode, and reports telemetry."""
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=10.0)
+
+        # 1. Pan rate = 10 deg/s (175 mrad/s), tilt rate = 0, Mode = 0x30 (ORION_MODE_SCENE)
+        cmd_pan = struct.pack(">hhBBB", 175, 0, OrionMode.SCENE, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_pan))
+        self.assertEqual(state.mode, OrionMode.SCENE)
+        self.assertAlmostEqual(state.target_pan, 11.0, delta=0.05)
+        self.assertEqual(state.target_tilt, -20.0)
+
+        # 2. Tilt rate with impulse time (5 = 0.5s): tilt down at -10 deg/s (-175 mrad/s)
+        cmd_impulse = struct.pack(">hhBBBH", 0, -175, OrionMode.SCENE, 0, 5, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_impulse))
+        # -20.0 + (-10.0 * 0.5) = -25.0
+        self.assertAlmostEqual(state.target_tilt, -25.0, delta=0.05)
+
+        # 3. Extended response echoes mode 0x30
+        cmd_ext = struct.pack(">hhBBBHB", 0, 0, OrionMode.SCENE, 1, 0, 103, 0)
+        resp = state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_ext))
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp[8], OrionMode.SCENE)
+
+        # 4. Geolocate telemetry reports mode 0x30 (48)
+        telemetry = state.get_geolocate_telemetry_core_packet()
+        self.assertEqual(telemetry[60], OrionMode.SCENE)
+
+    def test_rate_modes_cancel_geopoint(self):
+        """Verify that sending rate mode commands (0x10, 0x11, 0x30) cancels GEOPOINT mode."""
+        from orion_shadow.core.protocol import OrionMode
+        for mode in (OrionMode.RATE, OrionMode.GEO_RATE, OrionMode.SCENE):
+            state = GimbalState()
+            state.mode = OrionMode.GEOPOINT
+            cmd = struct.pack(">hhBBB", 0, 0, mode, 0, 0)
+            state.update_from_command(OrionPacket(OrionPktType.CMD, cmd))
+            self.assertEqual(state.mode, mode)
+            self.assertNotEqual(state.mode, OrionMode.GEOPOINT)
+
+    def test_orion_cmd_disabled_mode(self):
+        """Verify that ORION_MODE_DISABLED (0x00) disables motors and reports mode 0."""
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=10.0)
+        state.physics.pan["vel"] = 15.0
+        state.physics.tilt["vel"] = -10.0
+
+        cmd_disabled = struct.pack(">hhBBB", 0, 0, OrionMode.DISABLED, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_disabled))
+
+        self.assertEqual(state.mode, OrionMode.DISABLED)
+        self.assertEqual(state.physics.pan["vel"], 0.0)
+        self.assertEqual(state.physics.tilt["vel"], 0.0)
+
+        # Telemetry reports mode 0 when disabled
+        telemetry = state.get_geolocate_telemetry_core_packet()
+        self.assertEqual(telemetry[60], 0)
+
+    def test_orion_cmd_ffc_modes(self):
+        """Verify ORION_MODE_FFC_AUTO (0x20) and ORION_MODE_FFC_MANUAL (0x21)."""
+        import math
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=10.0)
+
+        # 1. FFC Auto (0x20): drives to blackbody position
+        cmd_auto = struct.pack(">hhBBB", 0, 0, OrionMode.FFC_AUTO, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_auto))
+        self.assertEqual(state.mode, OrionMode.FFC_AUTO)
+        self.assertTrue(state.ffc_active)
+        self.assertEqual(state.target_pan, 0.0)
+        self.assertEqual(state.target_tilt, min(25.0, state.tilt_max))
+        self.assertEqual(state.get_geolocate_telemetry_core_packet()[60], 0x20)
+
+        # 2. FFC Manual (0x21): drives to commanded payload position
+        pan_raw = int(math.radians(12.0) * 1000.0)
+        tilt_raw = int(math.radians(-15.0) * 1000.0)
+        cmd_manual = struct.pack(">hhBBB", pan_raw, tilt_raw, OrionMode.FFC_MANUAL, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_manual))
+        self.assertEqual(state.mode, OrionMode.FFC_MANUAL)
+        self.assertAlmostEqual(state.target_pan, 12.0, delta=0.1)
+        self.assertAlmostEqual(state.target_tilt, -15.0, delta=0.1)
+        self.assertEqual(state.get_geolocate_telemetry_core_packet()[60], 0x21)
+
+    def test_orion_cmd_track_mode(self):
+        """Verify ORION_MODE_TRACK (0x31) normalized bounding and FOV proportional offset."""
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=0.0)
+
+        # Command track box offset: norm_x = 0.25 (250), norm_y = -0.1 (-100)
+        cmd_track = struct.pack(">hhBBB", 250, -100, OrionMode.TRACK, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_track))
+
+        self.assertEqual(state.mode, OrionMode.TRACK)
+        self.assertAlmostEqual(state.track_box[0], 0.25, delta=0.001)
+        self.assertAlmostEqual(state.track_box[1], -0.1, delta=0.001)
+        self.assertEqual(state.tracking_mode, 2)
+
+        # Pan and tilt should adjust relative to FOV
+        hfov, vfov = state.current_fov_deg
+        expected_pan = 0.25 * hfov
+        expected_tilt = -20.0 - (-0.1 * vfov)
+        self.assertAlmostEqual(state.target_pan, expected_pan, delta=0.2)
+        self.assertAlmostEqual(state.target_tilt, expected_tilt, delta=0.2)
+
+        # Telemetry reports mode 0x31
+        self.assertEqual(state.get_geolocate_telemetry_core_packet()[60], 0x31)
+
+    def test_orion_cmd_calibration_and_null_gyros(self):
+        """Verify ORION_MODE_CALIBRATION (0x40) and ORION_MODE_NULL_GYROS (0x41)."""
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=5.0)
+
+        # Calibration (0x40)
+        cmd_cal = struct.pack(">hhBBB", 0, 0, OrionMode.CALIBRATION, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_cal))
+        self.assertEqual(state.mode, OrionMode.CALIBRATION)
+        self.assertTrue(state.calibration_active)
+        self.assertEqual(state.get_geolocate_telemetry_core_packet()[60], 0x40)
+
+        # Null Gyros (0x41)
+        cmd_null = struct.pack(">hhBBB", 0, 0, OrionMode.NULL_GYROS, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_null))
+        self.assertEqual(state.mode, OrionMode.NULL_GYROS)
+        self.assertTrue(state.gyro_calibrated)
+        self.assertEqual(state.physics.pan["vel"], 0.0)
+        self.assertEqual(state.physics.tilt["vel"], 0.0)
+        self.assertEqual(state.get_geolocate_telemetry_core_packet()[60], 0x41)
+
+    def test_orion_cmd_position_no_limits(self):
+        """Verify ORION_MODE_POSITION_NO_LIMITS (0x51) allows angles beyond software soft limits."""
+        import math
+        from orion_shadow.core.protocol import OrionMode
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=0.0)
+
+        # Soft limit for tilt is [-80, 28]. Command -88 degrees (-1.5359 rad * 1000 = -1536)
+        pan_raw = int(math.radians(0.0) * 1000.0)
+        tilt_raw = int(math.radians(-88.0) * 1000.0)
+        cmd_no_limits = struct.pack(">hhBBB", pan_raw, tilt_raw, OrionMode.POSITION_NO_LIMITS, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_no_limits))
+
+        self.assertEqual(state.mode, OrionMode.POSITION_NO_LIMITS)
+        self.assertAlmostEqual(state.target_tilt, -88.0, delta=0.2)
+
+        # Standard position mode (0x50) clamps to -80.0
+        cmd_standard = struct.pack(">hhBBB", pan_raw, tilt_raw, OrionMode.POSITION, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_standard))
+        self.assertEqual(state.target_tilt, -80.0)
+
+    def test_orion_cmd_path_mode(self):
+        """Verify ORION_MODE_PATH (0x70) command and ORION_PKT_PATH (0xD7) packet."""
+        from orion_shadow.core.protocol import OrionMode, OrionPktType
+        state = GimbalState(dt=0.1, tilt=-20.0, pan=0.0)
+
+        # 1. Path command via CMD mode 0x70
+        cmd_path = struct.pack(">hhBBB", 0, 0, OrionMode.PATH, 0, 0)
+        state.update_from_command(OrionPacket(OrionPktType.CMD, cmd_path))
+        self.assertEqual(state.mode, OrionMode.PATH)
+        self.assertEqual(state.get_geolocate_telemetry_core_packet()[60], 0x70)
+
+        # 2. Path packet (0xD7) with pointDown set
+        path_pkt_data = bytes([0, 1]) # numPoints=0, pointDown=1
+        state.update_from_command(OrionPacket(OrionPktType.PATH, path_pkt_data))
+        self.assertEqual(state.mode, OrionMode.PATH)
+        self.assertEqual(state.target_tilt, state.tilt_min)
+
 if __name__ == '__main__':
     unittest.main()

@@ -121,10 +121,32 @@ class OrionServer:
                 pan_raw, tilt_raw = struct.unpack_from(">hh", packet.data, 0)
                 if len(packet.data) >= 5:
                     mode = packet.data[4]
+                    mode_names = {
+                        0x00: "DISABLED",
+                        0x01: "FAULT",
+                        0x10: "RATE",
+                        0x11: "GEO_RATE",
+                        0x20: "FFC_AUTO",
+                        0x21: "FFC_MANUAL",
+                        0x30: "SCENE",
+                        0x31: "TRACK",
+                        0x40: "CALIBRATION",
+                        0x41: "NULL_GYROS",
+                        0x50: "POSITION",
+                        0x51: "POSITION_NO_LIMITS",
+                        0x60: "GEOPOINT",
+                        0x70: "PATH",
+                        0x71: "DOWN",
+                    }
+                    mode_name = mode_names.get(mode, f"0x{mode:02X}")
                     if mode in (0x10, 0x11, 0x30):
-                        details.append(f"mode=0x{mode:02X} (RATE), pan_rate={math.degrees(pan_raw/1000.0):.2f} deg/s, tilt_rate={math.degrees(tilt_raw/1000.0):.2f} deg/s")
+                        details.append(f"mode=0x{mode:02X} ({mode_name}), pan_rate={math.degrees(pan_raw/1000.0):.2f} deg/s, tilt_rate={math.degrees(tilt_raw/1000.0):.2f} deg/s")
+                    elif mode == 0x31:
+                        details.append(f"mode=0x{mode:02X} ({mode_name}), track_x={pan_raw/1000.0:.3f}, track_y={tilt_raw/1000.0:.3f}")
+                    elif mode in (0x50, 0x51, 0x21):
+                        details.append(f"mode=0x{mode:02X} ({mode_name}), pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
                     else:
-                        details.append(f"mode=0x{mode:02X}, pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
+                        details.append(f"mode=0x{mode:02X} ({mode_name})")
                 else:
                     details.append(f"pan={math.degrees(pan_raw/1000.0):.2f}, tilt={math.degrees(tilt_raw/1000.0):.2f}")
         elif packet.packet_id == OrionPktType.CAMERAS:
@@ -216,6 +238,8 @@ class OrionServer:
                 details.append(f"target_lat={lat:.5f}, target_lon={lon:.5f}, target_alt={alt:.1f}m, mode=ORION_MODE_GEOPOINT (0x60)")
             else:
                 details.append("mode=ORION_MODE_GEOPOINT (0x60)")
+        elif packet.packet_id == OrionPktType.PATH:
+            details.append(f"mode=ORION_MODE_PATH (0x70), payload={len(packet.data)} bytes")
 
         detail_str = f" ({', '.join(details)})" if details else ""
         return f"{pkt_name} [0x{packet.packet_id:02X}, len={len(packet.data)}]{detail_str}"
