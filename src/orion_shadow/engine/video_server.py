@@ -312,9 +312,9 @@ class VideoServer:
         if cv2 is None or np is None:
             return None
 
-        # Check up to 5 zoom levels up for an available parent tile in memory or on disk
+        # Check up zoom levels for an available parent tile in memory or on disk.
         # Prefer the closest (highest-zoom) parent to minimise upscaling blur.
-        min_z = max(1, z - 5)
+        min_z = max(1, self.visualizer.zoom_min if self.visualizer else 1)
         for pz in range(z - 1, min_z - 1, -1):
             dz = z - pz
             px = x >> dz

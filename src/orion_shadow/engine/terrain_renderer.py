@@ -321,9 +321,12 @@ class TerrainDraper:
         hit_ty = (1.0 - np.log(np.tan(lat_rad) + 1.0 / np.cos(lat_rad)) / math.pi) / 2.0 * n_zoom
 
         canvas_h, canvas_w = ground_texture.shape[:2]
-        # Keep coordinates unclamped so out-of-bounds rays sample BORDER_CONSTANT rather than streaking edge pixels
-        u_tex = np.clip((hit_tx - min_tx) * float(tile_px), -10000.0, float(canvas_w + 10000))
-        v_tex = np.clip((hit_ty - min_ty) * float(tile_px), -10000.0, float(canvas_h + 10000))
+        # Ground rays that hit physical terrain clamp to valid texture canvas boundaries [0, canvas - 1]
+        # so near/far boundary ground smoothly samples imagery rather than green BORDER_CONSTANT voids.
+        u_tex = np.clip((hit_tx - min_tx) * float(tile_px), 0.0, float(max(1, canvas_w - 1)))
+        v_tex = np.clip((hit_ty - min_ty) * float(tile_px), 0.0, float(max(1, canvas_h - 1)))
+        # Sky rays (rays pointing above terrain / horizon into the sky) are placed out of bounds
+        # so they sample BORDER_CONSTANT and are cleanly composited with atmospheric sky.
         u_tex[is_sky] = -100.0
         v_tex[is_sky] = -100.0
 

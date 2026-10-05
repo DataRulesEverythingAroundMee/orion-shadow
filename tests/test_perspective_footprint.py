@@ -385,6 +385,38 @@ def test_agl_perspective_footprint_covers_near_ground_at_high_zoom():
     assert min_ty <= 49732 <= max_ty, f"AGL footprint must cover near ground hit (ty=49732): bounds={fp_agl['tile_bounds']}"
 
 
+def test_footprint_tiles_fully_cover_bounding_box_without_holes():
+    """Verify that compute_footprint produces tiles covering 100% of the canvas bounding box with zero holes."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    lat, lon, alt = 39.7774, -84.0819, 324.9
+    cam_hdg, cam_pitch = 179.0, -12.3
+    hfov = 47.7 / 5.0
+    vfov = hfov * (720.0 / 1280.0)
+    zoom = 17
+
+    fp = viz.compute_footprint(lat, lon, alt, cam_hdg, cam_pitch, hfov, vfov, zoom, distance_lod=True, pad_tiles=2)
+    assert fp is not None
+    min_tx, min_ty, max_tx, max_ty = fp['tile_bounds']
+
+    # Map all covered base zoom cells
+    covered = set()
+    for (tz, tx, ty) in fp['tiles']:
+        dz = zoom - tz
+        scale = 1 << dz
+        for dty in range(scale):
+            for dtx in range(scale):
+                covered.add((tx * scale + dtx, ty * scale + dty))
+
+    # Verify every single cell in [min_tx..max_tx, min_ty..max_ty] is covered
+    missing = []
+    for ty in range(min_ty, max_ty + 1):
+        for tx in range(min_tx, max_tx + 1):
+            if (tx, ty) not in covered:
+                missing.append((tx, ty))
+
+    assert len(missing) == 0, f"Canvas bounding box has {len(missing)} unpainted tile holes: {missing[:10]}"
+
+
 if __name__ == '__main__':
     tests = [
         test_nadir_footprint_is_symmetric,
@@ -406,6 +438,7 @@ if __name__ == '__main__':
         test_zoomed_in_footprint_padding,
         test_cam_roll_in_compute_footprint,
         test_agl_perspective_footprint_covers_near_ground_at_high_zoom,
+        test_footprint_tiles_fully_cover_bounding_box_without_holes,
     ]
     for t in tests:
         try:

@@ -276,6 +276,39 @@ class TileVisualizer:
 
             all_tx = [c[0] for c in corners_tile_frac]
             all_ty = [c[1] for c in corners_tile_frac]
+
+            # In addition to the 4 corners, compute bottom-center ray intersection
+            # to guarantee the nearest ground along the bottom edge is included in bounds.
+            hw = math.tan(math.radians(hfov / 2.0))
+            hh = math.tan(math.radians(vfov / 2.0))
+            hdg_rad = math.radians(cam_hdg)
+            pitch_rad = math.radians(cam_pitch)
+            roll_rad = math.radians(cam_roll)
+            cos_h, sin_h = math.cos(hdg_rad), math.sin(hdg_rad)
+            cos_p, sin_p = math.cos(pitch_rad), math.sin(pitch_rad)
+            cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
+            fwd = (cos_p * cos_h, cos_p * sin_h, -sin_p)
+            r0 = (-sin_h, cos_h, 0.0)
+            d0 = (sin_p * cos_h, sin_p * sin_h, cos_p)
+            right = (cos_r * r0[0] + sin_r * d0[0], cos_r * r0[1] + sin_r * d0[1], cos_r * r0[2] + sin_r * d0[2])
+            down = (-sin_r * r0[0] + cos_r * d0[0], -sin_r * r0[1] + cos_r * d0[1], -sin_r * r0[2] + cos_r * d0[2])
+            bc_n = hh * down[0] + 1.0 * fwd[0]
+            bc_e = hh * down[1] + 1.0 * fwd[1]
+            bc_d = hh * down[2] + 1.0 * fwd[2]
+            bc_mag = math.sqrt(bc_n * bc_n + bc_e * bc_e + bc_d * bc_d)
+            if bc_mag > 1e-12:
+                bc_d = bc_d / bc_mag
+                if bc_d > 1e-4:
+                    t_bc = alt / bc_d
+                    gn_bc = (bc_n / bc_mag) * t_bc
+                    ge_bc = (bc_e / bc_mag) * t_bc
+                    if math.hypot(gn_bc, ge_bc) <= limit_range:
+                        c_lat = lat + gn_bc / 111320.0
+                        c_lon = lon + ge_bc / (111320.0 * cos_lat)
+                        tx_bc, ty_bc = self.latlon_to_tile_frac(max(-85.05, min(85.05, c_lat)), c_lon, zoom)
+                        all_tx.append(tx_bc)
+                        all_ty.append(ty_bc)
+
             min_tx = int(math.floor(min(all_tx)))
             max_tx = int(math.floor(max(all_tx)))
             min_ty = int(math.floor(min(all_ty)))
@@ -307,11 +340,14 @@ class TileVisualizer:
             return None
 
         max_tile_idx = 2 ** zoom - 1
-        if pad_tiles > 0 and max(max_tx - min_tx + 1, max_ty - min_ty + 1) + 2 * pad_tiles <= 64:
-            min_tx = max(0, min_tx - pad_tiles)
-            max_tx = min(max_tile_idx, max_tx + pad_tiles)
-            min_ty = max(0, min_ty - pad_tiles)
-            max_ty = min(max_tile_idx, max_ty + pad_tiles)
+        if pad_tiles > 0:
+            max_cur_dim = max(max_tx - min_tx + 1, max_ty - min_ty + 1)
+            pad = min(pad_tiles, max(1, (128 - max_cur_dim) // 2)) if max_cur_dim < 128 else 0
+            if pad > 0:
+                min_tx = max(0, min_tx - pad)
+                max_tx = min(max_tile_idx, max_tx + pad)
+                min_ty = max(0, min_ty - pad)
+                max_ty = min(max_tile_idx, max_ty + pad)
         else:
             min_tx = max(0, min_tx)
             max_tx = min(max_tile_idx, max_tx)
@@ -327,11 +363,11 @@ class TileVisualizer:
             # Distance-dependent LOD:
             # Tiles closer to the aircraft use base zoom (e.g. 17).
             # Tiles farther away step down (e.g. 16, 15, 14), reducing tile count by up to 90%.
+            # Covering all cells within the canvas bounding box ensures zero unpainted holes.
             ref_dist = max(100.0, d_near)
             min_zoom = max(self.zoom_min, zoom - 2)
             unique_tiles = set()
             inv_n = 1.0 / (2.0 ** zoom)
-            overlap_margin = 1.2 + float(pad_tiles)
 
             for ty in range(min_ty, max_ty + 1):
                 cell_y = ty + 0.5
@@ -340,8 +376,6 @@ class TileVisualizer:
                 dn = (cell_lat - lat) * 111320.0
 
                 for tx in range(min_tx, max_tx + 1):
-                    if not self._cell_overlaps_quad(tx, ty, quad, margin=overlap_margin):
-                        continue
                     cell_x = tx + 0.5
                     cell_lon = (cell_x * inv_n) * 360.0 - 180.0
                     de = (cell_lon - lon) * 111320.0 * cos_lat
