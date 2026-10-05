@@ -792,11 +792,15 @@ class VideoServer:
             # Use perspective footprint when altitude is sufficient
             footprint = None
             if alt >= 10.0:
+                cam_roll = telem.get('cam_roll', 0.0)
+                pad_tiles = 1 if (zoom >= 14 or self.is_3d_terrain_active) else 0
                 footprint = self.visualizer.compute_footprint(
                     telem['lat'], telem['lon'], alt,
                     telem['cam_hdg'], telem['cam_pitch'],
                     hfov, vfov, zoom, max_ground_range=65000.0, max_tiles=1500,
-                    distance_lod=self.distance_lod
+                    distance_lod=self.distance_lod,
+                    cam_roll=cam_roll,
+                    pad_tiles=pad_tiles
                 )
 
             tiles_to_fetch = []

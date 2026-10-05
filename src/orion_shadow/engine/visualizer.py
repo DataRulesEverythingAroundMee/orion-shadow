@@ -37,7 +37,8 @@ class TileVisualizer:
         return x, y
 
     def _corner_rays_ned(self, cam_hdg: float, cam_pitch: float,
-                         hfov: float, vfov: float
+                         hfov: float, vfov: float,
+                         cam_roll: float = 0.0
                          ) -> List[Tuple[float, float, float]]:
         """
         Compute the 4 FOV corner ray directions in NED (North-East-Down) frame.
@@ -64,16 +65,20 @@ class TileVisualizer:
 
         hdg_rad = math.radians(cam_hdg)
         pitch_rad = math.radians(cam_pitch)
+        roll_rad = math.radians(cam_roll)
         cos_h, sin_h = math.cos(hdg_rad), math.sin(hdg_rad)
         cos_p, sin_p = math.cos(pitch_rad), math.sin(pitch_rad)
+        cos_r, sin_r = math.cos(roll_rad), math.sin(roll_rad)
 
         # Camera basis vectors expressed in NED
         # Forward (boresight) in NED: azimuth=cam_hdg, elevation=cam_pitch
         fwd = (cos_p * cos_h, cos_p * sin_h, -sin_p)
-        # Right: horizontal perpendicular (heading + 90°), assumes zero roll
-        right = (-sin_h, cos_h, 0.0)
-        # Down (camera Y-axis): fwd × right
-        down = (sin_p * cos_h, sin_p * sin_h, cos_p)
+        # Unrolled right & down vectors in NED
+        r0 = (-sin_h, cos_h, 0.0)
+        d0 = (sin_p * cos_h, sin_p * sin_h, cos_p)
+        # Apply roll around boresight
+        right = (cos_r * r0[0] + sin_r * d0[0], cos_r * r0[1] + sin_r * d0[1], cos_r * r0[2] + sin_r * d0[2])
+        down = (-sin_r * r0[0] + cos_r * d0[0], -sin_r * r0[1] + cos_r * d0[1], -sin_r * r0[2] + cos_r * d0[2])
 
         rays = []
         for cx, cy, cz in corners_cam:
@@ -159,7 +164,9 @@ class TileVisualizer:
                           hfov: float, vfov: float, zoom: int,
                           max_ground_range: float = 20000.0,
                           max_tiles: int = 400,
-                          distance_lod: bool = True
+                          distance_lod: bool = True,
+                          cam_roll: float = 0.0,
+                          pad_tiles: int = 0
                           ) -> Optional[Dict[str, Any]]:
         """
         Compute the camera's perspective ground footprint as a quadrilateral.
@@ -204,7 +211,7 @@ class TileVisualizer:
                 logger.debug("Footprint rejected: zoom %d not in [%d, %d]", zoom, self.zoom_min, self.zoom_max)
             return None
 
-        rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov)
+        rays = self._corner_rays_ned(cam_hdg, cam_pitch, hfov, vfov, cam_roll=cam_roll)
 
         limit_range = max(65000.0, float(max_ground_range or 65000.0))
 
@@ -300,10 +307,16 @@ class TileVisualizer:
             return None
 
         max_tile_idx = 2 ** zoom - 1
-        min_tx = max(0, min_tx)
-        max_tx = min(max_tile_idx, max_tx)
-        min_ty = max(0, min_ty)
-        max_ty = min(max_tile_idx, max_ty)
+        if pad_tiles > 0 and max(max_tx - min_tx + 1, max_ty - min_ty + 1) + 2 * pad_tiles <= 64:
+            min_tx = max(0, min_tx - pad_tiles)
+            max_tx = min(max_tile_idx, max_tx + pad_tiles)
+            min_ty = max(0, min_ty - pad_tiles)
+            max_ty = min(max_tile_idx, max_ty + pad_tiles)
+        else:
+            min_tx = max(0, min_tx)
+            max_tx = min(max_tile_idx, max_tx)
+            min_ty = max(0, min_ty)
+            max_ty = min(max_tile_idx, max_ty)
 
         if not distance_lod:
             tiles = []
@@ -318,6 +331,7 @@ class TileVisualizer:
             min_zoom = max(self.zoom_min, zoom - 2)
             unique_tiles = set()
             inv_n = 1.0 / (2.0 ** zoom)
+            overlap_margin = 1.2 + float(pad_tiles)
 
             for ty in range(min_ty, max_ty + 1):
                 cell_y = ty + 0.5
@@ -326,7 +340,7 @@ class TileVisualizer:
                 dn = (cell_lat - lat) * 111320.0
 
                 for tx in range(min_tx, max_tx + 1):
-                    if not self._cell_overlaps_quad(tx, ty, quad):
+                    if not self._cell_overlaps_quad(tx, ty, quad, margin=overlap_margin):
                         continue
                     cell_x = tx + 0.5
                     cell_lon = (cell_x * inv_n) * 360.0 - 180.0

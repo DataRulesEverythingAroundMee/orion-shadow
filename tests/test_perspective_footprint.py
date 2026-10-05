@@ -175,11 +175,11 @@ def test_adaptive_zoom_increases_with_camera_zoom():
     state = GimbalState()
     server = VideoServer(state)
 
-    # Wide FOV (zoom 1x, hfov ≈ 47.7°) at 1000m altitude, -45° tilt
-    z_wide = server._compute_tile_zoom(lat=40.0, alt=1000.0, cam_pitch=-45.0, hfov=47.7)
+    # Wide FOV (zoom 1x, hfov ≈ 47.7°) at 3000m altitude, -45° tilt
+    z_wide = server._compute_tile_zoom(lat=40.0, alt=3000.0, cam_pitch=-45.0, hfov=47.7)
 
     # Narrow FOV (zoom 10x, hfov ≈ 4.77°) at same conditions
-    z_narrow = server._compute_tile_zoom(lat=40.0, alt=1000.0, cam_pitch=-45.0, hfov=4.77)
+    z_narrow = server._compute_tile_zoom(lat=40.0, alt=3000.0, cam_pitch=-45.0, hfov=4.77)
 
     assert z_narrow > z_wide, \
         f"Narrow FOV zoom ({z_narrow}) should be higher than wide FOV zoom ({z_wide})"
@@ -312,6 +312,49 @@ def test_distance_lod_disabled_flag():
     assert all(t[0] == 15 for t in fp['tiles']), "All tiles must be at zoom 15 when distance_lod=False"
 
 
+def test_zoomed_in_footprint_padding():
+    """At high zoom (e.g. 23x), pad_tiles=1 expands tile_bounds by 1 on each side and fetches surrounding buffer tiles."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    lat, lon, alt = 39.7774, -84.0819, 700.0
+    cam_hdg, cam_pitch = 0.0, -20.0
+    hfov = 47.7 / 23.0
+    vfov = hfov * (720.0 / 1280.0)
+    zoom = 17
+
+    fp_unpadded = viz.compute_footprint(lat, lon, alt, cam_hdg, cam_pitch, hfov, vfov, zoom, pad_tiles=0)
+    assert fp_unpadded is not None
+    min_tx_u, min_ty_u, max_tx_u, max_ty_u = fp_unpadded['tile_bounds']
+
+    fp_padded = viz.compute_footprint(lat, lon, alt, cam_hdg, cam_pitch, hfov, vfov, zoom, pad_tiles=1)
+    assert fp_padded is not None
+    min_tx_p, min_ty_p, max_tx_p, max_ty_p = fp_padded['tile_bounds']
+
+    assert min_tx_p == min_tx_u - 1
+    assert max_tx_p == max_tx_u + 1
+    assert min_ty_p == min_ty_u - 1
+    assert max_ty_p == max_ty_u + 1
+    # Padded tile set must contain all surrounding buffer tiles
+    assert len(fp_padded['tiles']) >= 9
+
+
+def test_cam_roll_in_compute_footprint():
+    """Camera roll angle rotates the computed ground footprint corners."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    lat, lon, alt = 39.7774, -84.0819, 1000.0
+    cam_hdg, cam_pitch = 0.0, -30.0
+    hfov, vfov = 47.7, 35.8
+    zoom = 15
+
+    fp_0 = viz.compute_footprint(lat, lon, alt, cam_hdg, cam_pitch, hfov, vfov, zoom, cam_roll=0.0)
+    fp_roll = viz.compute_footprint(lat, lon, alt, cam_hdg, cam_pitch, hfov, vfov, zoom, cam_roll=15.0)
+
+    assert fp_0 is not None and fp_roll is not None
+    # Rolled footprint corners must differ from 0-roll footprint corners
+    c_0 = fp_0['corners_latlon']
+    c_r = fp_roll['corners_latlon']
+    assert not all(math.isclose(p0[0], pr[0], abs_tol=1e-5) for p0, pr in zip(c_0, c_r))
+
+
 if __name__ == '__main__':
     tests = [
         test_nadir_footprint_is_symmetric,
@@ -330,6 +373,8 @@ if __name__ == '__main__':
         test_distance_dependent_lod_lowers_zoom_for_distant_tiles,
         test_distance_lod_reduces_tile_count,
         test_distance_lod_disabled_flag,
+        test_zoomed_in_footprint_padding,
+        test_cam_roll_in_compute_footprint,
     ]
     for t in tests:
         try:

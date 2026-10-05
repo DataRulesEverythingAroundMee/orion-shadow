@@ -321,8 +321,11 @@ class TerrainDraper:
         hit_ty = (1.0 - np.log(np.tan(lat_rad) + 1.0 / np.cos(lat_rad)) / math.pi) / 2.0 * n_zoom
 
         canvas_h, canvas_w = ground_texture.shape[:2]
-        u_tex = np.clip((hit_tx - min_tx) * float(tile_px), 0.0, float(max(1, canvas_w - 1)))
-        v_tex = np.clip((hit_ty - min_ty) * float(tile_px), 0.0, float(max(1, canvas_h - 1)))
+        # Keep coordinates unclamped so out-of-bounds rays sample BORDER_CONSTANT rather than streaking edge pixels
+        u_tex = np.clip((hit_tx - min_tx) * float(tile_px), -10000.0, float(canvas_w + 10000))
+        v_tex = np.clip((hit_ty - min_ty) * float(tile_px), -10000.0, float(canvas_h + 10000))
+        u_tex[is_sky] = -100.0
+        v_tex[is_sky] = -100.0
 
         # --- Fast 3D Hillshading calculation via 3D surface gradient ---
         # 3D coordinates in local meters (E, N, Up)
@@ -385,11 +388,10 @@ class TerrainDraper:
                                interpolation=cv2.INTER_CUBIC)[:, :, np.newaxis]
 
         # Warp ground texture over 3D terrain.
-        # Fix 1b: INTER_LANCZOS4 produces sharper satellite texture with far less
+        # INTER_LANCZOS4 produces sharper satellite texture with far less
         # blurring than INTER_LINEAR, at a minor extra CPU cost.
-        # Fix 1b (border): BORDER_REPLICATE avoids the bright-green fringe that
-        # BORDER_CONSTANT creates at the canvas edge during remap.
-        # Fix 3a: Use cv2.cuda.remap when OpenCV was compiled with CUDA support.
+        # BORDER_CONSTANT with earth-green base avoids edge-pixel streaking.
+        border_val = (38, 72, 45)
         if _CUDA_CV_AVAILABLE:
             try:
                 gpu_tex = cv2.cuda_GpuMat()
@@ -400,7 +402,8 @@ class TerrainDraper:
                 gpu_mapy.upload(map_y)
                 gpu_out = cv2.cuda.remap(gpu_tex, gpu_mapx, gpu_mapy,
                                          interpolation=cv2.INTER_LINEAR,
-                                         borderMode=cv2.BORDER_REPLICATE)
+                                         borderMode=cv2.BORDER_CONSTANT,
+                                         borderValue=border_val)
                 draped_ground = gpu_out.download()
             except Exception as e:
                 # Fall back to CPU if the CUDA call fails at runtime
@@ -408,13 +411,15 @@ class TerrainDraper:
                 draped_ground = cv2.remap(
                     ground_texture, map_x, map_y,
                     interpolation=cv2.INTER_LANCZOS4,
-                    borderMode=cv2.BORDER_REPLICATE,
+                    borderMode=cv2.BORDER_CONSTANT,
+                    borderValue=border_val,
                 )
         else:
             draped_ground = cv2.remap(
                 ground_texture, map_x, map_y,
                 interpolation=cv2.INTER_LANCZOS4,
-                borderMode=cv2.BORDER_REPLICATE,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=border_val,
             )
 
         # Apply 3D relief hillshading
