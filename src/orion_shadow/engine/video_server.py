@@ -427,14 +427,28 @@ class VideoServer:
                 if abs(lat) < 0.0001 and abs(lon) < 0.0001 and alt <= 0.0:
                     continue
 
+                ac_terrain_elev = 0.0
+                if self.terrain is not None and getattr(self.terrain, 'enabled', False):
+                    try:
+                        ac_terrain_elev = float(self.terrain.get_elevation(lat, lon))
+                    except Exception:
+                        pass
+                elif hasattr(self.state, 'terrain_alt') and self.state.terrain_alt is not None:
+                    try:
+                        ac_terrain_elev = float(self.state.terrain_alt)
+                    except Exception:
+                        pass
+
+                agl = max(20.0, alt - ac_terrain_elev)
+
                 hfov, vfov, _, _ = self._get_fov(zoom_val)
-                tile_zoom = self._compute_tile_zoom(lat, max(10.0, alt), cam_pitch, hfov) if alt >= 10.0 else (self.fixed_tile_zoom or min(17, self.max_tile_zoom))
+                tile_zoom = self._compute_tile_zoom(lat, agl, cam_pitch, hfov) if agl >= 10.0 else (self.fixed_tile_zoom or min(17, self.max_tile_zoom))
 
                 # Compute lookahead tiles along aircraft heading and camera orientation
                 future_tiles = self.visualizer.get_prefetch_tiles(
                     lat=lat,
                     lon=lon,
-                    alt=alt,
+                    alt=agl,
                     ac_hdg=ac_hdg,
                     cam_hdg=cam_hdg,
                     cam_pitch=cam_pitch,
@@ -569,7 +583,18 @@ class VideoServer:
         cam_roll = telem['cam_roll']
         lat = telem['lat']
         lon = telem['lon']
-        alt = max(50.0, telem['alt'])
+        ac_terrain_elev = 0.0
+        if self.terrain is not None and getattr(self.terrain, 'enabled', False):
+            try:
+                ac_terrain_elev = float(self.terrain.get_elevation(lat, lon))
+            except Exception:
+                pass
+        elif hasattr(self.state, 'terrain_alt') and self.state.terrain_alt is not None:
+            try:
+                ac_terrain_elev = float(self.state.terrain_alt)
+            except Exception:
+                pass
+        alt = max(50.0, telem['alt'] - ac_terrain_elev)
 
         # Calculate horizon Y relative to camera boresight
         # Looking down (negative pitch) moves horizon UP (towards y=0 and above)
@@ -784,18 +809,33 @@ class VideoServer:
             hfov, vfov, ppd_h, ppd_v = self._get_fov(telem['zoom'])
             alt = telem['alt']
 
+            # Compute height above ground (AGL) for perspective footprint and GSD.
+            ac_terrain_elev = 0.0
+            if self.terrain is not None and getattr(self.terrain, 'enabled', False):
+                try:
+                    ac_terrain_elev = float(self.terrain.get_elevation(telem['lat'], telem['lon']))
+                except Exception:
+                    pass
+            elif hasattr(self.state, 'terrain_alt') and self.state.terrain_alt is not None:
+                try:
+                    ac_terrain_elev = float(self.state.terrain_alt)
+                except Exception:
+                    pass
+
+            agl = max(20.0, alt - ac_terrain_elev)
+
             # Adaptive zoom: pick tile zoom level matching the camera's GSD
             zoom = self._compute_tile_zoom(
-                telem['lat'], max(10.0, alt), telem['cam_pitch'], hfov
-            ) if alt >= 10.0 else (self.fixed_tile_zoom or min(17, self.max_tile_zoom))
+                telem['lat'], agl, telem['cam_pitch'], hfov
+            ) if agl >= 10.0 else (self.fixed_tile_zoom or min(17, self.max_tile_zoom))
 
             # Use perspective footprint when altitude is sufficient
             footprint = None
-            if alt >= 10.0:
+            if agl >= 10.0:
                 cam_roll = telem.get('cam_roll', 0.0)
-                pad_tiles = 1 if (zoom >= 14 or self.is_3d_terrain_active) else 0
+                pad_tiles = 2 if self.is_3d_terrain_active else (1 if zoom >= 14 else 0)
                 footprint = self.visualizer.compute_footprint(
-                    telem['lat'], telem['lon'], alt,
+                    telem['lat'], telem['lon'], agl,
                     telem['cam_hdg'], telem['cam_pitch'],
                     hfov, vfov, zoom, max_ground_range=65000.0, max_tiles=1500,
                     distance_lod=self.distance_lod,

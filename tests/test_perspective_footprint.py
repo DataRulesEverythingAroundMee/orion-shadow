@@ -355,6 +355,36 @@ def test_cam_roll_in_compute_footprint():
     assert not all(math.isclose(p0[0], pr[0], abs_tol=1e-5) for p0, pr in zip(c_0, c_r))
 
 
+def test_agl_perspective_footprint_covers_near_ground_at_high_zoom():
+    """Verify that using AGL (alt - terrain_elev) at 5x zoom prevents missing near-ground tiles."""
+    viz = TileVisualizer("https://tile.example.com/{z}/{x}/{y}.png")
+    lat, lon = 39.7774, -84.0819
+    alt_msl = 574.9
+    elev = 250.0
+    agl = alt_msl - elev  # 324.9m
+    cam_hdg, cam_pitch = 179.0, -12.3
+    hfov = 47.7 / 5.0
+    vfov = hfov * (720.0 / 1280.0)
+    zoom = 17
+
+    # Bottom rays of sensor (near ground) at -12.3° pitch, 5.37° VFOV have depression angle ~15.0°
+    # Distance to actual terrain is agl / sin(depression) ≈ 324.9 / 0.258 ≈ 1256m
+    # In Dayton, OH heading South (179°), 1256m south corresponds to latitude 39.7661 -> tile Y ≈ 49732.1
+
+    # With MSL (old bug):
+    fp_msl = viz.compute_footprint(lat, lon, alt_msl, cam_hdg, cam_pitch, hfov, vfov, zoom, pad_tiles=1)
+    assert fp_msl is not None
+    # MSL mistakenly thought ground was at sea level (2224m away), so min_ty was 49734 (missing tile 49732)
+    assert fp_msl['tile_bounds'][1] > 49732, "MSL footprint should demonstrate the bug by missing near ground"
+
+    # With AGL (fixed):
+    fp_agl = viz.compute_footprint(lat, lon, agl, cam_hdg, cam_pitch, hfov, vfov, zoom, pad_tiles=2)
+    assert fp_agl is not None
+    min_tx, min_ty, max_tx, max_ty = fp_agl['tile_bounds']
+    # AGL bounds must cover the near ground hit at tile Y 49732
+    assert min_ty <= 49732 <= max_ty, f"AGL footprint must cover near ground hit (ty=49732): bounds={fp_agl['tile_bounds']}"
+
+
 if __name__ == '__main__':
     tests = [
         test_nadir_footprint_is_symmetric,
@@ -375,6 +405,7 @@ if __name__ == '__main__':
         test_distance_lod_disabled_flag,
         test_zoomed_in_footprint_padding,
         test_cam_roll_in_compute_footprint,
+        test_agl_perspective_footprint_covers_near_ground_at_high_zoom,
     ]
     for t in tests:
         try:
