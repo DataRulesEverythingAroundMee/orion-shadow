@@ -960,15 +960,12 @@ class VideoServer:
 
                     if self.terrain_draper is not None:
                         telem_key = (
-                            # Fix 5a: tighter rounding so the terrain frame cache is
-                            # properly invalidated on small movements at low AGL / high zoom.
-                            # lat/lon: 5 decimal places ≈ 1 m; alt: 1 m; heading: 1°.
                             round(telem['lat'], 5),
                             round(telem['lon'], 5),
-                            round(telem['alt'], 0),
-                            round(telem['cam_hdg'], 0),
-                            round(telem['cam_pitch'], 1),
-                            round(telem.get('cam_roll', 0.0), 1),
+                            round(telem['alt'], 1),
+                            round(telem['cam_hdg'], 2),
+                            round(telem['cam_pitch'], 2),
+                            round(telem.get('cam_roll', 0.0), 2),
                             round(telem['zoom'], 2)
                         )
                         if tiles_changed or self._cached_telem_key != telem_key or self._cached_warped_frame is None:
@@ -1106,29 +1103,38 @@ class VideoServer:
         if local_ip:
             dest_url += f"&localaddr={local_ip}"
 
+        # Ultra-low latency keyframe interval: ~0.25-0.4s to guarantee instant decoder lock and zero player buffering
+        gop_size = str(max(1, min(self.fps // 2, 6)))
+
         if self.gpu_encoding_enabled:
             nvenc_cmd = [
                 "ffmpeg",
                 "-y",
                 "-nostats",
                 "-loglevel", "warning",
+                "-thread_queue_size", "1",
                 "-f", "rawvideo",
                 "-pix_fmt", "bgr24",
                 "-s", f"{self.width}x{self.height}",
                 "-r", str(self.fps),
                 "-i", "pipe:0",
                 "-c:v", "h264_nvenc",
-                # Fix 3d: p4 (balanced) instead of p1 (lowest quality).
-                # hq tune: better quality at slightly higher encode cost — still GPU-bound.
-                # CBR at 4 Mbps gives consistent quality without bitrate spikes.
                 "-preset", "p4",
-                "-tune", "hq",
+                "-tune", "ull",
+                "-zerolatency", "1",
+                "-delay", "0",
+                "-rc-lookahead", "0",
+                "-forced-idr", "1",
+                "-g", gop_size,
+                "-keyint_min", gop_size,
                 "-rc", "cbr",
                 "-b:v", "4M",
-                "-maxrate", "6M",
-                "-bufsize", "8M",
-                "-zerolatency", "1",
+                "-maxrate", "4M",
+                "-bufsize", "500k",
                 "-pix_fmt", "yuv420p",
+                "-muxdelay", "0",
+                "-muxpreload", "0",
+                "-flush_packets", "1",
                 "-f", "mpegts",
                 dest_url
             ]
@@ -1149,6 +1155,7 @@ class VideoServer:
             "-y",
             "-nostats",
             "-loglevel", "warning",
+            "-thread_queue_size", "1",
             "-f", "rawvideo",
             "-pix_fmt", "bgr24",
             "-s", f"{self.width}x{self.height}",
@@ -1157,7 +1164,16 @@ class VideoServer:
             "-c:v", "libx264",
             "-preset", "ultrafast",
             "-tune", "zerolatency",
+            "-rc-lookahead", "0",
+            "-b:v", "4M",
+            "-maxrate", "4M",
+            "-bufsize", "500k",
+            "-g", gop_size,
+            "-keyint_min", gop_size,
             "-pix_fmt", "yuv420p",
+            "-muxdelay", "0",
+            "-muxpreload", "0",
+            "-flush_packets", "1",
             "-f", "mpegts",
             dest_url
         ]

@@ -372,10 +372,14 @@ class GimbalState:
                     if abs(pan_rate) > 1e-4:
                         new_pan = self.target_pan + pan_rate * dt
                         self.target_pan = (new_pan + 180.0) % 360.0 - 180.0 if self.pan_continuous else max(min(new_pan, self.pan_max), self.pan_min)
+                        if hasattr(self, 'physics'):
+                            self.physics.pan["vel"] = max(min(pan_rate, self.physics.max_vel), -self.physics.max_vel)
 
                     if abs(tilt_rate) > 1e-4:
                         new_tilt = self.target_tilt + tilt_rate * dt
                         self.target_tilt = max(min(new_tilt, self.tilt_max), self.tilt_min)
+                        if hasattr(self, 'physics'):
+                            self.physics.tilt["vel"] = max(min(tilt_rate, self.physics.max_vel), -self.physics.max_vel)
 
                     if logger.isEnabledFor(logging.DEBUG):
                         logger.debug(
@@ -1338,11 +1342,39 @@ class GimbalState:
         else:
             los_x, los_y, los_z = 0, 0, 0
 
+        # Compute velNED from aircraft speed and heading
+        speed_mps = getattr(self, 'aircraft_speed', 0.0) / 1.94384
+        hdg_deg = getattr(self, 'aircraft_heading', 0.0)
+        pitch_deg = getattr(self, 'aircraft_pitch', 0.0)
+        roll_deg = getattr(self, 'aircraft_roll', 0.0)
+        vn = speed_mps * math.cos(math.radians(hdg_deg))
+        ve = speed_mps * math.sin(math.radians(hdg_deg))
+        vd = 0.0
+        vn_raw = int(round(max(-32767, min(32767, vn * 100.0))))
+        ve_raw = int(round(max(-32767, min(32767, ve * 100.0))))
+        vd_raw = int(round(max(-32767, min(32767, vd * 100.0))))
+
+        # Compute gimbalQuat attitude from heading, pitch, roll
+        cy = math.cos(math.radians(hdg_deg * 0.5))
+        sy = math.sin(math.radians(hdg_deg * 0.5))
+        cp = math.cos(math.radians(pitch_deg * 0.5))
+        sp = math.sin(math.radians(pitch_deg * 0.5))
+        cr = math.cos(math.radians(roll_deg * 0.5))
+        sr = math.sin(math.radians(roll_deg * 0.5))
+        q0 = cr * cp * cy + sr * sp * sy
+        q1 = sr * cp * cy - cr * sp * sy
+        q2 = cr * sp * cy + sr * cp * sy
+        q3 = cr * cp * sy - sr * sp * cy
+        q0_raw = int(round(max(-32767, min(32767, q0 * 32767.0))))
+        q1_raw = int(round(max(-32767, min(32767, q1 * 32767.0))))
+        q2_raw = int(round(max(-32767, min(32767, q2 * 32767.0))))
+        q3_raw = int(round(max(-32767, min(32767, q3 * 32767.0))))
+
         data = bytearray()
         data.extend(struct.pack(">IIHh", uptime_ms, 0, 0, 0))
         data.extend(struct.pack(">iii", int(round(lat_rad * 572957795.1308)), int(round(lon_rad * 572957795.1308)), int(round(alt_m * 10000.0))))
-        data.extend(struct.pack(">hhh", 0, 0, 0))  # velNED
-        data.extend(struct.pack(">hhhh", 32767, 0, 0, 0))  # gimbalQuat
+        data.extend(struct.pack(">hhh", vn_raw, ve_raw, vd_raw))  # velNED
+        data.extend(struct.pack(">hhhh", q0_raw, q1_raw, q2_raw, q3_raw))  # gimbalQuat
         data.extend(struct.pack(">hh", int(round(pan_rad * 10430.06004058)), int(round(tilt_rad * 10430.06004058))))
         data.extend(struct.pack(">HH", int(round(hfov_rad * 10430.21919553)), int(round(vfov_rad * 10430.21919553))))
         data.extend(struct.pack(">hhh", los_x, los_y, los_z))  # losECEF

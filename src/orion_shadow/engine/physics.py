@@ -12,9 +12,9 @@ class PhysicsEngine:
         self.pan = {"pos": float(initial_pan), "vel": 0.0, "acc": 0.0}
         self.tilt = {"pos": float(initial_tilt), "vel": 0.0, "acc": 0.0}
         
-        # Physical constants (approximating a heavy gimbal)
-        self.max_vel = 60.0  # deg/s
-        self.max_acc = 100.0 # deg/s^2
+        # Physical constants (approximating an agile airborne gimbal)
+        self.max_vel = 90.0  # deg/s
+        self.max_acc = 200.0 # deg/s^2
         self.damping = 0.95  # simplistic friction/damping
 
     def step(self, target_pan: float, target_tilt: float, continuous_pan: bool = True,
@@ -38,8 +38,8 @@ class PhysicsEngine:
                 target = max(min(target, max_limit), min_limit)
             error = target - axis["pos"]
         
-        # Critically damped PD control for smooth, overshoot-free response
-        desired_acc = error * 20.0 - axis["vel"] * 9.0
+        # Critically damped PD control for responsive, overshoot-free tracking
+        desired_acc = error * 45.0 - axis["vel"] * 13.4
         
         # Clamp acceleration
         desired_acc = max(min(desired_acc, self.max_acc), -self.max_acc)
